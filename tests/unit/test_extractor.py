@@ -98,14 +98,6 @@ class TestProcessMemoryWriteASCII:
 class TestProcessMemoryWriteUnicode:
     """UTF-16LE string extraction via process_memory_write."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "_extract_unicode has a bug: data.split(b'\\x00\\x00\\x00')[0]"
-            " + b'\\x00\\x00' always appends a null word that decodes to"
-            " U+0000, which fails the printable check."
-        ),
-        strict=True,
-    )
     def test_extracts_utf16le(self) -> None:
         """A valid UTF-16LE string longer than min_length is extracted."""
         ext = StringExtractor(min_length=4)
@@ -117,14 +109,6 @@ class TestProcessMemoryWriteUnicode:
         assert results[0]["content"] == "ABCD"
         assert results[0]["encoding"] == "UTF-16LE"
 
-    @pytest.mark.xfail(
-        reason=(
-            "_extract_unicode has a bug: data.split(b'\\x00\\x00\\x00')[0]"
-            " + b'\\x00\\x00' always appends a null word that decodes to"
-            " U+0000, which fails the printable check."
-        ),
-        strict=True,
-    )
     def test_utf16le_strips_trailing_nulls(self) -> None:
         """Extra null word(s) at the end are stripped during decode."""
         ext = StringExtractor(min_length=4)
@@ -303,3 +287,97 @@ class TestGetResults:
         assert "encoding" in entry
         assert "content" in entry
         assert "tags" in entry
+
+
+# ---------------------------------------------------------------------------
+# scan_buffer — larger memory scanning
+# ---------------------------------------------------------------------------
+
+
+class TestScanBuffer:
+    """scan_buffer() extracts multiple strings from noisy memory dumps."""
+
+    def test_finds_domain_embedded_in_noise(self) -> None:
+        """ASCII domain surrounded by cipher noise is extracted."""
+        ext = StringExtractor(min_length=4)
+        noise_before = bytes(range(0x80, 0xA0))  # 32 non-printable bytes
+        noise_after = bytes(range(0xC0, 0xE0))   # 32 non-printable bytes
+        payload = b"thecyberyeti.com"
+        data = noise_before + payload + noise_after
+        ext.scan_buffer(0x40000, data)
+        results = ext.get_results()
+        contents = [r["content"] for r in results]
+        assert "thecyberyeti.com" in contents
+
+    def test_embedded_string_not_at_offset_zero(self) -> None:
+        """Strings not starting at offset 0 are found with correct address."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff\xfe\xfd" + b"ABCDEFGH" + b"\xff\xfe"
+        ext.scan_buffer(0x1000, data)
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "ABCDEFGH"
+        assert results[0]["location"] == str(0x1000 + 3)
+
+    def test_multiple_ascii_fragments(self) -> None:
+        """Multiple distinct printable runs are each extracted."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff" + b"first" + b"\xff\xff" + b"second" + b"\xff"
+        ext.scan_buffer(0x2000, data)
+        results = ext.get_results()
+        contents = [r["content"] for r in results]
+        assert "first" in contents
+        assert "second" in contents
+
+    def test_rejects_short_noise_fragments(self) -> None:
+        """Runs shorter than min_length are not reported."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff" + b"ab" + b"\xff" + b"cd" + b"\xff"
+        ext.scan_buffer(0x3000, data)
+        assert ext.get_results() == []
+
+    def test_utf16le_embedded_in_noise(self) -> None:
+        """UTF-16LE string surrounded by noise is extracted."""
+        ext = StringExtractor(min_length=4)
+        noise = b"\xff\xff\xff\xff"
+        payload = b"T\x00e\x00s\x00t\x00"  # "Test" in UTF-16LE
+        data = noise + payload + noise
+        ext.scan_buffer(0x5000, data)
+        results = ext.get_results()
+        contents = [r["content"] for r in results]
+        assert "Test" in contents
+
+    def test_deduplication_across_scan(self) -> None:
+        """Identical strings found at different offsets are stored once."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff" + b"dupe" + b"\xff\xff" + b"dupe" + b"\xff"
+        ext.scan_buffer(0x6000, data)
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "dupe"
+
+    def test_empty_buffer_is_safe(self) -> None:
+        """Passing empty or None data does not crash."""
+        ext = StringExtractor(min_length=4)
+        ext.scan_buffer(0x7000, b"")
+        ext.scan_buffer(0x7000, None)
+        assert ext.get_results() == []
+
+    def test_regex_labels_applied_in_scan(self) -> None:
+        """Regex labels still apply to strings found by scan_buffer."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff\xff" + b"192.168.1.1" + b"\xff\xff"
+        ext.scan_buffer(0x8000, data)
+        results = ext.get_results()
+        assert len(results) >= 1
+        matched = [r for r in results if r["content"] == "192.168.1.1"]
+        assert len(matched) == 1
+        assert "Matched_Regex" in matched[0]["tags"]
+
+    def test_process_memory_write_still_works(self) -> None:
+        """Existing process_memory_write is not broken by scan_buffer addition."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x1000, b"Hello")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "Hello"

@@ -21,6 +21,10 @@ class MalwareEmulator:
         self.debug = debug
         self.module = None
         self.extractor = StringExtractor()
+        
+        # Thêm tracker để ghi log địa chỉ được ghi (nhỏ gọn, không tốn performance)
+        from hooks.mem_hooks import WriteTracker
+        self.tracker = WriteTracker()
 
         config_dict = speakeasy.config.get_default_config_dict()
         config_dict['timeout'] = self.timeout
@@ -61,7 +65,7 @@ class MalwareEmulator:
         Đăng ký Memory Hooks và API Hooks.
         """
         logger.info("[Emulator] Đang cắm các cảm biến Hooks (Mem & API)...")
-        setup_memory_hooks(self.se, self.extractor)
+        setup_memory_hooks(self.se, self.extractor, tracker=self.tracker)
         setup_api_hooks(self.se, self.extractor)
 
     def run(self):
@@ -83,6 +87,22 @@ class MalwareEmulator:
                 logger.error(f"[Emulator] Bị gián đoạn: {e}")
 
         self._extract_from_report()
+        # Xử lý các vùng nhớ đã tracker sau khi giả lập kết thúc
+        self._extract_tracked_memory()
+
+    def _extract_tracked_memory(self):
+        tracker_regions = self.tracker.get_regions()
+        if not tracker_regions:
+            return
+            
+        logger.info(f"[Emulator] Queuing {len(tracker_regions)} coalesced dirty regions for regex scan.")
+        for start_addr, end_addr in tracker_regions:
+            size_to_read = min(end_addr - start_addr, 4096) # Giới hạn 4KB mỗi block để an toàn
+            try:
+                mem_data = self.se.mem_read(start_addr, size_to_read)
+                self.extractor.process_memory_write(hex(start_addr), mem_data)
+            except Exception as e:
+                logger.debug(f"[Emulator] Lỗi đọc dirty region {hex(start_addr)}: {e}")
 
     def _extract_from_report(self):
         """

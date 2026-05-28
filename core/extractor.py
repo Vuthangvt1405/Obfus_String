@@ -64,20 +64,111 @@ class StringExtractor:
         return None
 
     def _extract_unicode(self, data):
-        # UTF-16LE đơn giản: char, 0x00, char, 0x00
-        # Thử decode
+        """
+        Purpose:
+        Decode a byte sequence as UTF-16LE and return the string if all
+        characters are printable and the result meets min_length.
+
+        How it works:
+        Strips trailing null bytes, ensures even length for UTF-16LE,
+        decodes, then filters out non-printable characters.
+
+        Parameters:
+        - data: raw bytes to attempt UTF-16LE decoding on.
+
+        Returns:
+        The decoded string if valid, or None.
+        """
         try:
-            # Xóa các byte null dư thừa ở cuối
-            clean_data = data.split(b'\x00\x00\x00')[0] + b'\x00\x00' 
+            # Strip trailing null bytes
+            clean_data = data.rstrip(b'\x00')
+            if not clean_data:
+                return None
+            # UTF-16LE requires even number of bytes
+            if len(clean_data) % 2 != 0:
+                clean_data = clean_data + b'\x00'
             decoded = clean_data.decode('utf-16-le')
-            
-            # Kiểm tra xem có đều là ký tự in được không
+
+            # Check all characters are printable
             if all(c in string.printable for c in decoded):
                 if len(decoded) >= self.min_length:
                     return decoded
-        except:
-             pass
+        except (UnicodeDecodeError, ValueError):
+            pass
         return None
+
+    def scan_buffer(self, base_address, data):
+        """
+        Purpose:
+        Scan a larger memory buffer for all embedded printable ASCII and
+        UTF-16LE substrings, even when surrounded by cipher noise.
+
+        How it works:
+        Walks the buffer byte-by-byte collecting runs of printable ASCII
+        characters. Each run that meets min_length is emitted. After the
+        ASCII pass, a second pass looks for UTF-16LE runs (printable byte
+        followed by 0x00) of sufficient length.
+
+        Parameters:
+        - base_address: base virtual address of the buffer (for location labels).
+        - data: raw bytes (may be large, noisy memory dump).
+
+        Returns:
+        None — results are appended to self.results via _add_result.
+        """
+        if not data:
+            return
+
+        # --- ASCII scan ---
+        run_start = None
+        run_bytes = bytearray()
+        for i, b in enumerate(data):
+            if b in self.valid_chars:
+                if run_start is None:
+                    run_start = i
+                run_bytes.append(b)
+            else:
+                if len(run_bytes) >= self.min_length:
+                    self._add_result(
+                        base_address + run_start,
+                        run_bytes.decode('ascii'),
+                        "ASCII",
+                    )
+                run_start = None
+                run_bytes = bytearray()
+        # flush trailing run
+        if len(run_bytes) >= self.min_length:
+            self._add_result(
+                base_address + run_start,
+                run_bytes.decode('ascii'),
+                "ASCII",
+            )
+
+        # --- UTF-16LE scan ---
+        i = 0
+        length = len(data)
+        while i < length - 1:
+            char_byte = data[i]
+            null_byte = data[i + 1]
+            if char_byte in self.valid_chars and null_byte == 0x00:
+                u16_start = i
+                u16_chars = []
+                while i < length - 1:
+                    cb = data[i]
+                    nb = data[i + 1]
+                    if cb in self.valid_chars and nb == 0x00:
+                        u16_chars.append(chr(cb))
+                        i += 2
+                    else:
+                        break
+                if len(u16_chars) >= self.min_length:
+                    self._add_result(
+                        base_address + u16_start,
+                        ''.join(u16_chars),
+                        "UTF-16LE",
+                    )
+            else:
+                i += 1
 
     def _add_result(self, location, content, encoding):
         # Loại trùng lặp
