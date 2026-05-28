@@ -463,3 +463,114 @@ class TestProvenance:
         assert isinstance(entry["content"], str)
         assert isinstance(entry["tags"], list)
         assert isinstance(entry["source"], str)
+
+
+# ---------------------------------------------------------------------------
+# Noise filter — repetitive padding, alphabets, Base64 constants
+# ---------------------------------------------------------------------------
+
+
+class TestNoiseFilter:
+    """Repetitive padding, standard alphabets, and Base64 constants are
+    recognized as noise and filtered from results."""
+
+    def test_repetitive_padding_filtered(self) -> None:
+        """Repetitive padding like '((((...' is not stored."""
+        ext = StringExtractor(min_length=4)
+        data = b"((((((((((((((((((((((((((("  # 25 parens — all same char
+        ext.process_memory_write(0x1000, data)
+        assert ext.get_results() == []
+
+    def test_uppercase_alphabet_filtered(self) -> None:
+        """Standard uppercase alphabet is not stored."""
+        ext = StringExtractor(min_length=4)
+        data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ext.process_memory_write(0x2000, data)
+        assert ext.get_results() == []
+
+    def test_lowercase_alphabet_filtered(self) -> None:
+        """Standard lowercase alphabet is not stored."""
+        ext = StringExtractor(min_length=4)
+        data = b"abcdefghijklmnopqrstuvwxyz"
+        ext.process_memory_write(0x3000, data)
+        assert ext.get_results() == []
+
+    def test_base64_alphabet_filtered(self) -> None:
+        """Full Base64 alphabet (A-Za-z0-9+/) is not stored."""
+        ext = StringExtractor(min_length=4)
+        data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        ext.process_memory_write(0x4000, data)
+        assert ext.get_results() == []
+
+    def test_useful_string_survives_noise_filter(self) -> None:
+        """Useful strings like svchost.exe are NOT filtered."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x5000, b"svchost.exe")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "svchost.exe"
+
+    def test_useful_string_among_noise_in_buffer(self) -> None:
+        """scan_buffer finds useful strings while filtering noise."""
+        ext = StringExtractor(min_length=4)
+        noise = b"((((((((((((((((("  # 17 parens
+        useful = b"svchost.exe"
+        data = b"\xff" + noise + b"\xff" + useful + b"\xff" + noise + b"\xff"
+        ext.scan_buffer(0x6000, data)
+        results = ext.get_results()
+        contents = [r["content"] for r in results]
+        assert "svchost.exe" in contents
+        assert "(((((((((((((((((" not in contents
+
+
+# ---------------------------------------------------------------------------
+# Provenance merge / elevation — API priority over memory
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceMerge:
+    """When the same content is observed from multiple sources, the API
+    hook source takes priority over memory-write or deferred-scan sources,
+    and no duplicate entry is emitted."""
+
+    def test_api_elevates_over_mem_write(self) -> None:
+        """String first seen via mem_write then API → source becomes api_hook."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x1000, b"shared_content")
+        ext.process_api_string("some_api", "shared_content")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "shared_content"
+        assert results[0]["source"] == "api_hook"
+
+    def test_api_elevates_over_deferred_scan(self) -> None:
+        """String first seen via deferred_scan then API → source becomes api_hook."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff\xff" + b"shared_content" + b"\xff\xff"
+        ext.scan_buffer(0x2000, data)
+        ext.process_api_string("some_api", "shared_content")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "shared_content"
+        assert results[0]["source"] == "api_hook"
+
+    def test_api_stays_when_added_first(self) -> None:
+        """String first seen via API then memory → source stays api_hook."""
+        ext = StringExtractor(min_length=4)
+        ext.process_api_string("some_api", "shared_content")
+        ext.process_memory_write(0x3000, b"shared_content")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "shared_content"
+        assert results[0]["source"] == "api_hook"
+
+    def test_no_duplicates_after_multi_source_merge(self) -> None:
+        """Multiple additions of same content from different sources produce one entry."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x4000, b"dup_content")
+        ext.process_api_string("api1", "dup_content")
+        ext.process_api_string("api2", "dup_content")
+        ext.process_memory_write(0x5000, b"dup_content")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "dup_content"

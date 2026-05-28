@@ -276,3 +276,342 @@ class TestLstrcpyALegacyHook:
         assert len(results) == 1
         assert results[0]["content"] == "legacy_copy_test"
         assert "lstrcpyA" in results[0]["location"]
+
+
+# ---------------------------------------------------------------------------
+# WinHttpConnect hook — WinHTTP network server name capture
+# ---------------------------------------------------------------------------
+
+
+class TestWinHttpConnectHook:
+
+    def _install_and_fire(self, argv, mem_table):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        emu = FakeEmu(mem_table)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == "WinHttpConnect":
+                cb = c.args[0]
+                cb(emu, "WinHttpConnect", None, argv)
+                break
+        return ext
+
+    def test_captures_server_name(self) -> None:
+        ext = self._install_and_fire(
+            argv=[0xAAAA, 0x5000, 443, 0],
+            mem_table={(0x5000, 2): "c2.malware.test"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "c2.malware.test"
+        assert "WinHttpConnect" in results[0]["location"]
+
+    def test_bad_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            argv=[0xAAAA, 0xDEAD, 443, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_null_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            argv=[0xAAAA, 0, 443, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_short_argv_does_not_crash(self) -> None:
+        ext = self._install_and_fire(argv=[0xAAAA], mem_table={})
+        assert ext.get_results() == []
+
+
+# ---------------------------------------------------------------------------
+# CreateProcessA / CreateProcessW hooks — process creation
+# ---------------------------------------------------------------------------
+
+
+class TestCreateProcessHook:
+
+    def _install_and_fire(self, api_name, argv, mem_table):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        emu = FakeEmu(mem_table)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == api_name:
+                cb = c.args[0]
+                cb(emu, api_name, None, argv)
+                break
+        return ext
+
+    def test_captures_application_name_ansi(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessA",
+            argv=[0x5000, 0x5100, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={(0x5000, 1): "cmd.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "cmd.exe"
+        assert "CreateProcessA" in results[0]["location"]
+
+    def test_captures_command_line_ansi(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessA",
+            argv=[0x5000, 0x5100, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={(0x5100, 1): "cmd.exe /c whoami"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "cmd.exe /c whoami"
+        assert "CreateProcessA" in results[0]["location"]
+
+    def test_captures_application_name_wide(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessW",
+            argv=[0x5000, 0x5100, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={(0x5000, 2): "powershell.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "powershell.exe"
+        assert "CreateProcessW" in results[0]["location"]
+
+    def test_captures_command_line_wide(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessW",
+            argv=[0x5000, 0x5100, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={(0x5100, 2): "calc.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "calc.exe"
+        assert "CreateProcessW" in results[0]["location"]
+
+    def test_bad_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessA",
+            argv=[0xDEAD, 0xBEEF, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_null_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessA",
+            argv=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_short_argv_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateProcessA",
+            argv=[0x5000],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+
+# ---------------------------------------------------------------------------
+# ShellExecuteA / ShellExecuteW hooks — command / process execution
+# ---------------------------------------------------------------------------
+
+
+class TestShellExecuteHook:
+
+    def _install_and_fire(self, api_name, argv, mem_table):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        emu = FakeEmu(mem_table)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == api_name:
+                cb = c.args[0]
+                cb(emu, api_name, None, argv)
+                break
+        return ext
+
+    def test_captures_operation_ansi(self) -> None:
+        ext = self._install_and_fire(
+            "ShellExecuteA",
+            argv=[0, 0x5000, 0x5100, 0x5200, 0, 0],
+            mem_table={(0x5100, 1): "https://evil.com/pay.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) >= 1
+        assert results[0]["content"] == "https://evil.com/pay.exe"
+        assert "ShellExecuteA" in results[0]["location"]
+
+    def test_captures_file_wide(self) -> None:
+        ext = self._install_and_fire(
+            "ShellExecuteW",
+            argv=[0, 0x5000, 0x5100, 0x5200, 0, 0],
+            mem_table={(0x5100, 2): "C:\\Malware\\payload.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) >= 1
+        assert results[0]["content"] == "C:\\Malware\\payload.exe"
+        assert "ShellExecuteW" in results[0]["location"]
+
+    def test_bad_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "ShellExecuteA",
+            argv=[0, 0xDEAD, 0xBEEF, 0, 0, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_null_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "ShellExecuteA",
+            argv=[0, 0, 0, 0, 0, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_short_argv_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "ShellExecuteA",
+            argv=[0, 0x5000],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+
+# ---------------------------------------------------------------------------
+# RegOpenKeyExA / RegOpenKeyExW hooks — registry access
+# ---------------------------------------------------------------------------
+
+
+class TestRegOpenKeyExHook:
+
+    def _install_and_fire(self, api_name, argv, mem_table):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        emu = FakeEmu(mem_table)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == api_name:
+                cb = c.args[0]
+                cb(emu, api_name, None, argv)
+                break
+        return ext
+
+    def test_captures_subkey_ansi(self) -> None:
+        ext = self._install_and_fire(
+            "RegOpenKeyExA",
+            argv=[0x80000002, 0x5000, 0, 0, 0x6000],
+            mem_table={(0x5000, 1): "Software\\Microsoft\\Windows\\CurrentVersion\\Run"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in results[0]["content"]
+        assert "RegOpenKeyExA" in results[0]["location"]
+
+    def test_captures_subkey_wide(self) -> None:
+        ext = self._install_and_fire(
+            "RegOpenKeyExW",
+            argv=[0x80000002, 0x5000, 0, 0, 0x6000],
+            mem_table={(0x5000, 2): "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert "RunOnce" in results[0]["content"]
+        assert "RegOpenKeyExW" in results[0]["location"]
+
+    def test_bad_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "RegOpenKeyExA",
+            argv=[0x80000002, 0xDEAD, 0, 0, 0x6000],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_null_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "RegOpenKeyExA",
+            argv=[0x80000002, 0, 0, 0, 0x6000],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_short_argv_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "RegOpenKeyExA",
+            argv=[0x80000002],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+
+# ---------------------------------------------------------------------------
+# CreateFileA / CreateFileW hooks — filesystem access
+# ---------------------------------------------------------------------------
+
+
+class TestCreateFileHook:
+
+    def _install_and_fire(self, api_name, argv, mem_table):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        emu = FakeEmu(mem_table)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == api_name:
+                cb = c.args[0]
+                cb(emu, api_name, None, argv)
+                break
+        return ext
+
+    def test_captures_filename_ansi(self) -> None:
+        ext = self._install_and_fire(
+            "CreateFileA",
+            argv=[0x5000, 0x80000000, 0, 0, 3, 0x80, 0],
+            mem_table={(0x5000, 1): "C:\\Windows\\Temp\\malware.dll"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "C:\\Windows\\Temp\\malware.dll"
+        assert "CreateFileA" in results[0]["location"]
+
+    def test_captures_filename_wide(self) -> None:
+        ext = self._install_and_fire(
+            "CreateFileW",
+            argv=[0x5000, 0x80000000, 0, 0, 3, 0x80, 0],
+            mem_table={(0x5000, 2): "C:\\Users\\Public\\payload.exe"},
+        )
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "C:\\Users\\Public\\payload.exe"
+        assert "CreateFileW" in results[0]["location"]
+
+    def test_bad_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateFileA",
+            argv=[0xDEAD, 0x80000000, 0, 0, 3, 0x80, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_null_pointer_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateFileA",
+            argv=[0, 0x80000000, 0, 0, 3, 0x80, 0],
+            mem_table={},
+        )
+        assert ext.get_results() == []
+
+    def test_short_argv_does_not_crash(self) -> None:
+        ext = self._install_and_fire(
+            "CreateFileA",
+            argv=[0x5000],
+            mem_table={},
+        )
+        assert ext.get_results() == []
