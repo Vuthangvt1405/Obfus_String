@@ -67,6 +67,10 @@ To protect against byte-at-a-time decoding sequences and performance penalties, 
 - **Chunked Reads & Error Suppression:** Tracked memory is read in chunks (e.g., 4096 bytes) with bounding limits per dirty block (e.g., 8192 bytes) to handle malware attempting to allocate massive unmapped pages. Exception handling in `se.mem_read()` ensures continuous recovery of decoded strings.
 - **PE Boundary Scopes:** Memory tracking is strictly confined to PE-mapped regions to avoid misinterpretation of cross-binary capabilities. No promises are made regarding static decryption capabilities - the framework functions exclusively via dynamic interception and deferred tracking mechanisms.
 
+## Analyst Output Semantics
+
+Analyst-facing string output suppresses common scaffold and noise strings by default, so reports focus on likely malware-controlled values rather than emulator or harness artifacts. API-observed strings may include optional provenance fields such as `source_detail`, while keeping the JSON schema compatible for consumers that only read the base string fields. This does not imply perfect static decryption, since recovery still depends on what execution and hooks observe at runtime.
+
 ## Verification & Testing
 
 Run the Pytest suite for offline verification:
