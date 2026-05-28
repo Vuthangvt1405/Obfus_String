@@ -31,3 +31,14 @@ STDERR:
 2026-05-28 14:44:30,952 | ERROR   | [-] Quá trình nạp mẫu thất bại. Dừng chương trình.
 
 RETURN_CODE: 1
+
+--- TEST MISSING FILE ---
+STDOUT:
+
+STDERR:
+2026-05-28 21:16:42,480 | INFO    | [*] Bắt đầu phân tích mẫu: file_not_exist_xyz.exe
+2026-05-28 21:16:42,482 | INFO    | [Loader] Đang đọc file PE: file_not_exist_xyz.exe
+2026-05-28 21:16:42,482 | ERROR   | [Loader] Speakeasy từ chối file này: Target file not found: file_not_exist_xyz.exe
+2026-05-28 21:16:42,482 | ERROR   | [-] Quá trình nạp mẫu thất bại. Dừng chương trình.
+
+RETURN_CODE: 1

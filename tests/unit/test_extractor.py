@@ -433,8 +433,8 @@ class TestProvenance:
         results = ext.get_results()
         assert len(results) == 1
         assert results[0]["content"] == "shared_content"
-        # The source of the first insertion wins
-        assert results[0]["source"] == "mem_write"
+        # api_hook elevates over mem_write (provenance merge)
+        assert results[0]["source"] == "api_hook"
 
     def test_content_only_consumer_ignores_source(self) -> None:
         """A consumer reading only content/encoding/location/tags does not break."""

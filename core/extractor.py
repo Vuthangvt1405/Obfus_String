@@ -173,15 +173,47 @@ class StringExtractor:
             else:
                 i += 1
 
+    # Canonical noise strings: standard alphabets and Base64 charset
+    _NOISE_STRINGS = frozenset({
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "abcdefghijklmnopqrstuvwxyz",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    })
+
+    def _is_noise(self, content):
+        """
+        Purpose:
+        Determine whether a decoded string is noise (repetitive padding,
+        standard alphabets, or Base64 character-set constants).
+
+        How it works:
+        Returns True for single-unique-char repetition (e.g. '((((') or
+        exact matches against known alphabet / Base64 constants.
+
+        Parameters:
+        - content: the decoded string to check.
+
+        Returns:
+        True if the string should be discarded as noise, False otherwise.
+        """
+        if len(set(content)) == 1:
+            return True
+        if content in self._NOISE_STRINGS:
+            return True
+        return False
+
     def _add_result(self, location, content, encoding, source=None):
         """
         Purpose:
-        Record an extracted string result, deduplicating by content.
+        Record an extracted string result, deduplicating by content and
+        elevating provenance when a higher-priority source re-submits
+        the same content.
 
         How it works:
-        Skips if content already exists in results. Computes regex-based tags
-        and optionally attaches a `source` field to tag where the string
-        originated (e.g. mem_write, deferred_scan, api_hook).
+        Rejects noise via _is_noise(). On duplicate content, merges by
+        elevating source to 'api_hook' if the new source is 'api_hook'.
+        Otherwise skips. Computes regex-based tags and attaches a `source`
+        field.
 
         Parameters:
         - location: virtual address or API name where the string was found.
@@ -192,9 +224,15 @@ class StringExtractor:
         Returns:
         None — results are appended to self.results.
         """
-        # Loại trùng lặp — dedup is content-only, source is ignored
+        # Reject noise strings (padding, alphabets, base64 constants)
+        if self._is_noise(content):
+            return
+
+        # Dedup with provenance merge: api_hook elevates over other sources
         for res in self.results:
             if res['content'] == content:
+                if source == 'api_hook' and res.get('source') != 'api_hook':
+                    res['source'] = 'api_hook'
                 return
 
         # Đánh label nếu khớp regex

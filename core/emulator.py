@@ -120,14 +120,76 @@ class MalwareEmulator:
                 
                 offset += chunk_size
 
+    # Known scaffold/environment noise strings from Speakeasy's built-in
+    # stub DLLs and emulator scaffolding that are never useful for malware
+    # analysis.  These are exact-match only — no substring matching — to
+    # avoid over-filtering legitimate malware strings.
+    _SPEAKEASY_SCAFFOLD_NOISE = frozenset({
+        # Stub DLL paths injected by the Speakeasy loader
+        "C:\\Windows\\system32\\ntdll.dll",
+        "C:\\Windows\\system32\\kernel32.dll",
+        "C:\\Windows\\system32\\kernelbase.dll",
+        "C:\\Windows\\system32\\ws2_32.dll",
+        "C:\\Windows\\system32\\wininet.dll",
+        "C:\\Windows\\system32\\winhttp.dll",
+        "C:\\Windows\\system32\\advapi32.dll",
+        "C:\\Windows\\system32\\user32.dll",
+        "C:\\Windows\\system32\\gdi32.dll",
+        "C:\\Windows\\system32\\msvcrt.dll",
+        "C:\\Windows\\system32\\shell32.dll",
+        "C:\\Windows\\system32\\shlwapi.dll",
+        "C:\\Windows\\system32\\urlmon.dll",
+        "C:\\Windows\\system32\\dnsapi.dll",
+        "C:\\Windows\\system32\\CRYPT32.dll",
+        "C:\\Windows\\system32\\WTSAPI32.dll",
+        "C:\\Windows\\system32\\dbghelp.dll",
+        "C:\\Windows\\system32\\advpack.dll",
+        "C:\\Windows\\system32\\psapi.dll",
+        "C:\\Windows\\system32\\hal.dll",
+        "C:\\Windows\\system32\\mscoree.dll",
+        # Stub module names (without path)
+        "ntdll.dll",
+        "kernel32.dll",
+        "kernelbase.dll",
+        "ws2_32.dll",
+        "wininet.dll",
+        "winhttp.dll",
+        "advapi32.dll",
+        "user32.dll",
+        "gdi32.dll",
+        "msvcrt.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "urlmon.dll",
+        "dnsapi.dll",
+        "CRYPT32.dll",
+        "WTSAPI32.dll",
+        "dbghelp.dll",
+        "advpack.dll",
+        "psapi.dll",
+        "hal.dll",
+        "mscoree.dll",
+    })
+
+    def _is_scaffold_noise(self, s):
+        """Return True if *s* is an exact match against known Speakeasy
+        scaffold/environment noise strings (stub DLL names/paths)."""
+        return s in self._SPEAKEASY_SCAFFOLD_NOISE
+
     def _extract_from_report(self):
         """
-        Trích xuất thêm chuỗi từ Speakeasy built-in report (API calls, strings).
+        Trích xuất thêm chuỗi từ Speakeasy built-in report.
+
+        Speakeasy report-derived strings (API args, in-memory decoded
+        strings) are passed through ``process_api_string()`` which applies
+        the global noise filter (``_is_noise`` — repetitive padding,
+        standard alphabets, Base64 constants) and the scaffold-noise
+        pre-filter (``_is_scaffold_noise``) before being recorded.
         """
         try:
-            report = self.se.get_report()
             report_json = json.loads(self.se.get_json_report())
 
+            # ── API call arguments (flat list, older Speakeasy format) ──
             for entry in report_json.get('entry_points', []):
                 for api_call in entry.get('apis', []):
                     api_name = api_call.get('api_name', '')
@@ -136,9 +198,21 @@ class MalwareEmulator:
                         if len(val) >= 4 and val.isprintable():
                             self.extractor.process_api_string(api_name, val)
 
-                for s in entry.get('strings', {}).get('in_memory', []):
+            # ── In-memory decoded strings (Speakeasy v2 report level) ──
+            strings = report_json.get('strings') or {}
+            in_memory = strings.get('in_memory') or {}
+
+            for bucket_key in ('ansi', 'unicode'):
+                for s in in_memory.get(bucket_key, []):
                     if isinstance(s, str) and len(s) >= 4:
-                        self.extractor.process_api_string('speakeasy_report', s)
+                        # Pre-filter known scaffold noise before it reaches
+                        # the global filter — these are exact-match DLL
+                        # names/paths from the emulator's stub loader.
+                        if self._is_scaffold_noise(s):
+                            continue
+                        self.extractor.process_api_string(
+                            'speakeasy_report', s,
+                        )
 
         except Exception as e:
             logger.debug(f"[Emulator] Không thể trích xuất từ report: {e}")
