@@ -32,21 +32,21 @@ class StringExtractor:
         # 1. Thử giải mã ASCII
         str_val = self._extract_ascii(data)
         if str_val:
-            self._add_result(address, str_val, "ASCII")
+            self._add_result(address, str_val, "ASCII", source='mem_write')
             return
 
         # 2. Thử giải mã Unicode (UTF-16 LE)
         # Nếu malware ghi wide string, byte rác 0x00 xen kẽ rất nhiều
         str_val = self._extract_unicode(data)
         if str_val:
-            self._add_result(address, str_val, "UTF-16LE")
+            self._add_result(address, str_val, "UTF-16LE", source='mem_write')
 
     def process_api_string(self, api_name, str_val):
         """
         Ghi nhận chuỗi lấy trực tiếp từ tham số API (rất sạch).
         """
         if str_val and len(str_val) >= self.min_length:
-             self._add_result(f"API_{api_name}", str_val, "API_ARG")
+             self._add_result(f"API_{api_name}", str_val, "API_ARG", source='api_hook')
 
     def _extract_ascii(self, data):
         # Lấy dải ký tự in được liên tiếp
@@ -133,6 +133,7 @@ class StringExtractor:
                         base_address + run_start,
                         run_bytes.decode('ascii'),
                         "ASCII",
+                        source='deferred_scan',
                     )
                 run_start = None
                 run_bytes = bytearray()
@@ -142,6 +143,7 @@ class StringExtractor:
                 base_address + run_start,
                 run_bytes.decode('ascii'),
                 "ASCII",
+                source='deferred_scan',
             )
 
         # --- UTF-16LE scan ---
@@ -166,12 +168,31 @@ class StringExtractor:
                         base_address + u16_start,
                         ''.join(u16_chars),
                         "UTF-16LE",
+                        source='deferred_scan',
                     )
             else:
                 i += 1
 
-    def _add_result(self, location, content, encoding):
-        # Loại trùng lặp
+    def _add_result(self, location, content, encoding, source=None):
+        """
+        Purpose:
+        Record an extracted string result, deduplicating by content.
+
+        How it works:
+        Skips if content already exists in results. Computes regex-based tags
+        and optionally attaches a `source` field to tag where the string
+        originated (e.g. mem_write, deferred_scan, api_hook).
+
+        Parameters:
+        - location: virtual address or API name where the string was found.
+        - content: the decoded string value.
+        - encoding: "ASCII", "UTF-16LE", or "API_ARG".
+        - source: optional provenance tag (None = omitted from entry).
+
+        Returns:
+        None — results are appended to self.results.
+        """
+        # Loại trùng lặp — dedup is content-only, source is ignored
         for res in self.results:
             if res['content'] == content:
                 return
@@ -193,6 +214,8 @@ class StringExtractor:
             "content": content,
             "tags": tags
         }
+        if source is not None:
+            entry["source"] = source
         self.results.append(entry)
         logger.debug(f"[Extractor] Đã bắt được chuỗi: '{content}' (Tại: {location})")
 

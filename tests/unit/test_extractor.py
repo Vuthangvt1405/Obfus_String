@@ -381,3 +381,85 @@ class TestScanBuffer:
         results = ext.get_results()
         assert len(results) == 1
         assert results[0]["content"] == "Hello"
+
+
+# ---------------------------------------------------------------------------
+# Provenance — backward-compatible source tagging
+# ---------------------------------------------------------------------------
+
+
+class TestProvenance:
+    """Optional `source` field tracks where each string was captured."""
+
+    def test_mem_write_has_provenance(self) -> None:
+        """process_memory_write results carry source='mem_write'."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x1000, b"mem_write_string")
+        entry = ext.get_results()[0]
+        assert entry["source"] == "mem_write"
+
+    def test_api_hook_has_provenance(self) -> None:
+        """process_api_string results carry source='api_hook'."""
+        ext = StringExtractor(min_length=4)
+        ext.process_api_string("lstrcpyA", "api_hook_string")
+        entry = ext.get_results()[0]
+        assert entry["source"] == "api_hook"
+
+    def test_deferred_scan_has_provenance(self) -> None:
+        """scan_buffer results carry source='deferred_scan'."""
+        ext = StringExtractor(min_length=4)
+        data = b"\xff" + b"deferred_string" + b"\xff"
+        ext.scan_buffer(0x2000, data)
+        entry = ext.get_results()[0]
+        assert entry["source"] == "deferred_scan"
+
+    def test_required_keys_still_present_with_source(self) -> None:
+        """Entry with source still has all required fields (location, encoding, content, tags)."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x3000, b"key_check_provenance")
+        entry = ext.get_results()[0]
+        assert "location" in entry
+        assert "encoding" in entry
+        assert "content" in entry
+        assert "tags" in entry
+        assert "source" in entry
+
+    def test_dedup_not_affected_by_source(self) -> None:
+        """Same content from different sources is stored once (dedup is content-only)."""
+        ext = StringExtractor(min_length=4)
+        # Add via mem_write and api_hook with same content
+        ext.process_memory_write(0x4000, b"shared_content")
+        ext.process_api_string("some_api", "shared_content")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "shared_content"
+        # The source of the first insertion wins
+        assert results[0]["source"] == "mem_write"
+
+    def test_content_only_consumer_ignores_source(self) -> None:
+        """A consumer reading only content/encoding/location/tags does not break."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x5000, b"content_only_test")
+        ext.process_api_string("lstrcpyA", "api_only_test")
+        ext.scan_buffer(0x6000, b"\xff" + b"scan_only_test" + b"\xff")
+        for entry in ext.get_results():
+            # A legacy consumer that never looks at 'source' must still work
+            assert "location" in entry
+            assert "encoding" in entry
+            assert "content" in entry
+            assert "tags" in entry
+            # source is optional — accessing it would not fail, but
+            # a consumer that ignores it is fine
+            assert len(entry["content"]) >= 4
+
+    def test_source_never_overwrites_mandatory_fields(self) -> None:
+        """The 'source' key must not collide with or overwrite mandatory fields."""
+        ext = StringExtractor(min_length=4)
+        ext.process_memory_write(0x7000, b"safe_provenance")
+        entry = ext.get_results()[0]
+        # Verify mandatory fields are strings (or list for tags) as expected
+        assert isinstance(entry["location"], str)
+        assert isinstance(entry["encoding"], str)
+        assert isinstance(entry["content"], str)
+        assert isinstance(entry["tags"], list)
+        assert isinstance(entry["source"], str)
