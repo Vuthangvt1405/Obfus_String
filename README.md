@@ -57,3 +57,36 @@ python main.py -f packed_malware.exe -t 120 -o unpacked_strings.json
 1. **Loader:** Không chọc vào đĩa hệ thống thật, nạp PE PE an toàn vào Sandbox bộ nhớ cấu trúc cô lập của Python. Cấu trúc tự động nhận diện kiến trúc 32-bit hay 64-bit.
 2. **Execution:** Malware tưởng mình đang ở môi trường Windows thật. Nó chạy các quy trình unpack/giải mã lên bộ nhớ cấp phát ảo.
 3. **Extraction:** Mỗi khi malware ghi một byte xuống memory ảo hoặc chạy hàm Copy Chuỗi hệ điều hành (lstrcpy), module sẽ bắt lại và decode thử. Nếu là ASCII hoặc Wide String hợp lệ, đoạn dữ liệu sẽ được parse thành Regex Label và lưu ra file JSON.
+
+## Runtime String Capture Workflow (Deferred Memory Tracking)
+
+To protect against byte-at-a-time decoding sequences and performance penalties, the framework implements a deferred memory capture model:
+
+- **WriteTracker Coalescing:** Memory hooks (`MEM_WRITE`) now only queue lightweight tuples `(start, end)` instead of processing each byte individually. Adjacent or overlapping address ranges are merged in O(1) look-back (up to 10 entries).
+- **Post-Run Extraction:** After Speakeasy execution completes, `MalwareEmulator._extract_tracked_memory()` iterates over consolidated memory blocks (up to 4KB chunks) and feeds full decrypted memory spaces to the regex extractor safely.
+- **Chunked Reads & Error Suppression:** Tracked memory is read in chunks (e.g., 4096 bytes) with bounding limits per dirty block (e.g., 8192 bytes) to handle malware attempting to allocate massive unmapped pages. Exception handling in `se.mem_read()` ensures continuous recovery of decoded strings.
+- **PE Boundary Scopes:** Memory tracking is strictly confined to PE-mapped regions to avoid misinterpretation of cross-binary capabilities. No promises are made regarding static decryption capabilities - the framework functions exclusively via dynamic interception and deferred tracking mechanisms.
+
+## Verification & Testing
+
+Run the Pytest suite for offline verification:
+
+```bash
+# Run all unit tests
+pytest tests/unit/
+
+# Run tests with specific markers
+pytest -m unit
+pytest -m integration
+pytest -m speakeasy
+
+# Run smoke tests specifically
+pytest tests/unit/test_smoke.py
+
+# Run extractor and reporter tests
+pytest tests/unit/test_extractor.py
+pytest tests/unit/test_reporter.py
+
+# Verbose output for detailed results
+pytest -v
+```

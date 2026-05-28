@@ -96,13 +96,29 @@ class MalwareEmulator:
             return
             
         logger.info(f"[Emulator] Queuing {len(tracker_regions)} coalesced dirty regions for regex scan.")
+        
+        MAX_CHUNK_SIZE = 4096
+        MAX_TOTAL_SCAN_PER_REGION = 8192 # cap per block per instructions
+        
         for start_addr, end_addr in tracker_regions:
-            size_to_read = min(end_addr - start_addr, 4096) # Giới hạn 4KB mỗi block để an toàn
-            try:
-                mem_data = self.se.mem_read(start_addr, size_to_read)
-                self.extractor.process_memory_write(hex(start_addr), mem_data)
-            except Exception as e:
-                logger.debug(f"[Emulator] Lỗi đọc dirty region {hex(start_addr)}: {e}")
+            total_size = end_addr - start_addr
+            if total_size <= 0:
+                continue
+                
+            total_size = min(total_size, MAX_TOTAL_SCAN_PER_REGION)
+            
+            offset = 0
+            while offset < total_size:
+                chunk_size = min(MAX_CHUNK_SIZE, total_size - offset)
+                current_addr = start_addr + offset
+                try:
+                    mem_data = self.se.mem_read(current_addr, chunk_size)
+                    if mem_data:
+                        self.extractor.scan_buffer(current_addr, mem_data)
+                except Exception as e:
+                    logger.debug(f"[Emulator] Lỗi đọc dirty region {hex(current_addr)}: {e}")
+                
+                offset += chunk_size
 
     def _extract_from_report(self):
         """
