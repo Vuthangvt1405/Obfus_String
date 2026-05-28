@@ -47,6 +47,10 @@ def pytest_configure(config):
         "markers",
         "requires_fixture(name): skip test when the named fixture file is missing",
     )
+    config.addinivalue_line(
+        "markers",
+        "mem_write_timing: behavior probe tests for mem_read timing inside write hooks",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
