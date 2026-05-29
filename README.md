@@ -54,43 +54,78 @@ python main.py -f packed_malware.exe -t 120 -o unpacked_strings.json
 
 ## Cách hoạt động
 
-1. **Loader:** Không chọc vào đĩa hệ thống thật, nạp PE PE an toàn vào Sandbox bộ nhớ cấu trúc cô lập của Python. Cấu trúc tự động nhận diện kiến trúc 32-bit hay 64-bit.
-2. **Execution:** Malware tưởng mình đang ở môi trường Windows thật. Nó chạy các quy trình unpack/giải mã lên bộ nhớ cấp phát ảo.
-3. **Extraction:** Mỗi khi malware ghi một byte xuống memory ảo hoặc chạy hàm Copy Chuỗi hệ điều hành (lstrcpy), module sẽ bắt lại và decode thử. Nếu là ASCII hoặc Wide String hợp lệ, đoạn dữ liệu sẽ được parse thành Regex Label và lưu ra file JSON.
+Luồng chạy chính bắt đầu ở `main.py` và đi qua các bước sau:
 
-## Runtime String Capture Workflow (Deferred Memory Tracking)
+1. **Nhận tham số CLI:** `main.py` đọc đường dẫn mẫu PE (`-f`), timeout (`-t`), kiến trúc mong muốn (`-a`), file output (`-o`) và chế độ debug (`-d`).
+2. **Khởi tạo emulator:** `MalwareEmulator` tạo `StringExtractor`, `WriteTracker`, cấu hình timeout cho Speakeasy, rồi tạo sandbox Speakeasy tách biệt với hệ thống thật.
+3. **Nạp mẫu PE:** `load_sample()` gọi `se.load_module()` để nạp file PE vào không gian bộ nhớ giả lập. Khi bật debug, loader in thêm image base, entry point và section layout.
+4. **Đăng ký hook:** `register_hooks()` cắm hai nhóm cảm biến:
+   - `hooks/mem_hooks.py`: theo dõi các vùng nhớ bị ghi (`MEM_WRITE`) bằng `WriteTracker`.
+   - `hooks/api_hooks.py`: hook các Windows API có tham số chuỗi để lấy chuỗi trực tiếp từ API arguments.
+5. **Chạy giả lập:** `run()` gọi `se.run_module()`. Nếu Speakeasy gặp API chưa hỗ trợ hoặc timeout, script ghi log và vẫn cố thu thập dữ liệu đã quan sát được.
+6. **Thu thập chuỗi:** Sau khi chạy, emulator lấy chuỗi từ Speakeasy JSON report, rồi đọc lại các vùng nhớ đã bị ghi để scan chuỗi ASCII và UTF-16LE theo từng chunk.
+7. **Lọc và gắn nhãn:** `StringExtractor` bỏ chuỗi nhiễu phổ biến, loại chuỗi quá ngắn, deduplicate theo `content`, gắn `source` (`api_hook`, `deferred_scan`, `mem_write`) và tag regex khi thấy IP, URL, domain hoặc registry path.
+8. **Xuất báo cáo:** `ReportGenerator` ghi JSON gồm `timestamp`, `total_strings` và danh sách `strings` ra file output, mặc định là `report.json`.
 
-To protect against byte-at-a-time decoding sequences and performance penalties, the framework implements a deferred memory capture model:
+Kết quả phụ thuộc vào đường thực thi thực tế trong emulator. Script không giải mã tĩnh toàn bộ binary; nó chỉ thu được chuỗi xuất hiện trong report Speakeasy, memory writes hoặc API calls đã được hook trong lúc chạy.
 
-- **WriteTracker Coalescing:** Memory hooks (`MEM_WRITE`) now only queue lightweight tuples `(start, end)` instead of processing each byte individually. Adjacent or overlapping address ranges are merged in O(1) look-back (up to 10 entries).
-- **Post-Run Extraction:** After Speakeasy execution completes, `MalwareEmulator._extract_tracked_memory()` iterates over consolidated memory blocks (up to 4KB chunks) and feeds full decrypted memory spaces to the regex extractor safely.
-- **Chunked Reads & Error Suppression:** Tracked memory is read in chunks (e.g., 4096 bytes) with bounding limits per dirty block (e.g., 8192 bytes) to handle malware attempting to allocate massive unmapped pages. Exception handling in `se.mem_read()` ensures continuous recovery of decoded strings.
-- **PE Boundary Scopes:** Memory tracking is strictly confined to PE-mapped regions to avoid misinterpretation of cross-binary capabilities. No promises are made regarding static decryption capabilities - the framework functions exclusively via dynamic interception and deferred tracking mechanisms.
+## Quy trình bắt chuỗi lúc chạy (Deferred Memory Tracking)
 
-## Analyst Output Semantics
+Để tránh xử lý từng byte khi malware giải mã chuỗi và để giảm chi phí hiệu năng, framework dùng mô hình thu thập bộ nhớ trì hoãn:
 
-Analyst-facing string output suppresses common scaffold and noise strings by default, so reports focus on likely malware-controlled values rather than emulator or harness artifacts. API-observed strings may include optional provenance fields such as `source_detail`, while keeping the JSON schema compatible for consumers that only read the base string fields. This does not imply perfect static decryption, since recovery still depends on what execution and hooks observe at runtime.
+- **Gộp vùng ghi bằng WriteTracker:** Memory hook (`MEM_WRITE`) chỉ lưu tuple nhẹ `(start, end)` thay vì giải mã ngay từng byte. Các vùng nhớ liền kề hoặc chồng lấn được gộp lại trong phạm vi nhìn ngược nhỏ (tối đa 10 vùng gần nhất).
+- **Trích xuất sau khi chạy:** Sau khi Speakeasy hoàn tất, `MalwareEmulator._extract_tracked_memory()` duyệt các vùng nhớ đã gộp, đọc theo chunk tối đa 4KB và đưa dữ liệu đã giải mã vào bộ lọc regex.
+- **Đọc theo chunk và bỏ qua lỗi:** Bộ nhớ đã theo dõi được đọc theo từng chunk, giới hạn tối đa mỗi vùng bẩn khoảng 8192 byte. Nếu `se.mem_read()` lỗi vì vùng nhớ không hợp lệ, script ghi debug log và tiếp tục vùng khác.
+- **Giới hạn theo vùng PE:** Tracking chỉ phục vụ chuỗi xuất hiện trong quá trình giả lập. Script không cam kết giải mã tĩnh toàn bộ binary; khả năng thu hồi phụ thuộc vào đường chạy và hook quan sát được.
 
-## Verification & Testing
+## Phạm vi API hook
 
-Run the Pytest suite for offline verification:
+API hook được cài trong `hooks/api_hooks.py`. Mỗi hook chỉ đọc các tham số con trỏ chuỗi đã cấu hình, dùng ANSI (`A`, width 1) hoặc UTF-16LE wide (`W`, width 2). Nếu Speakeasy không hỗ trợ một API nào đó, lỗi cài hook chỉ được ghi cảnh báo và quá trình giả lập vẫn tiếp tục.
+
+| Module | API hook | Tham số chuỗi được bắt | Giá trị phân tích |
+|---|---|---|---|
+| `kernel32` | `lstrcpyA`, `lstrcpyW` | Con trỏ chuỗi nguồn | Bắt chuỗi được copy sau khi unpack hoặc giải mã lúc chạy. |
+| `kernel32` | `VirtualAlloc` | Không bắt chuỗi; chỉ log size/protection | Hỗ trợ debug hành vi cấp phát bộ nhớ khi unpack/giải mã. |
+| `wininet` | `InternetConnectA/W` | Server name | Bắt host/domain C2 truyền vào WinINet. |
+| `wininet` | `InternetOpenA/W` | User-agent | Bắt chuỗi user-agent HTTP của malware. |
+| `wininet` | `HttpOpenRequestA/W` | HTTP verb, object/path | Bắt method request và đường dẫn URI. |
+| `urlmon` | `URLDownloadToFileA/W` | URL, tên file output | Bắt URL tải xuống và đường dẫn lưu file. |
+| `winhttp` | `WinHttpOpen`, `WinHttpOpenA/W` | User-agent, proxy, proxy bypass | Bắt chuỗi cấu hình phiên WinHTTP. |
+| `winhttp` | `WinHttpConnect`, `WinHttpConnectA/W` | Server name | Bắt hostname C2 dùng qua WinHTTP. |
+| `winhttp` | `WinHttpOpenRequest`, `WinHttpOpenRequestA/W` | Verb, path, HTTP version, referrer | Bắt metadata request và endpoint path. |
+| `winhttp` | `WinHttpGetProxyForUrl`, `WinHttpGetProxyForUrlA/W` | URL | Bắt URL dùng cho proxy discovery. |
+| `winhttp` | `WinHttpSendRequest`, `WinHttpSendRequestA/W` | Headers | Bắt header HTTP outbound. |
+| `kernel32` | `CreateProcessA/W` | Application name, command line | Bắt đường dẫn tiến trình con và command line. |
+| `shell32` | `ShellExecuteA/W` | File/executable path | Bắt payload hoặc lệnh được mở qua shell. |
+| `advapi32` | `RegOpenKeyExA/W` | Registry subkey | Bắt registry key dùng cho persistence hoặc đọc cấu hình. |
+| `kernel32` | `CreateFileA/W` | File name/path | Bắt file được mở, drop hoặc đọc bởi mẫu. |
+
+Factory hook chung sẽ chuyển chuỗi bắt được vào `StringExtractor.process_api_string()`. Nếu chuỗi vượt qua bộ lọc, kết quả được lưu với `encoding: "API_ARG"` và `source: "api_hook"`.
+
+## Ý nghĩa output cho analyst
+
+Output mặc định loại bỏ các chuỗi scaffold và chuỗi nhiễu phổ biến để báo cáo tập trung vào giá trị nhiều khả năng do malware kiểm soát, thay vì artifact của emulator hoặc test harness. Chuỗi quan sát qua API có thể có thêm metadata provenance như `source_detail`, nhưng schema JSON vẫn tương thích với consumer chỉ đọc các field cơ bản. Điều này không đồng nghĩa với giải mã tĩnh hoàn hảo, vì khả năng thu hồi vẫn phụ thuộc vào đường thực thi và hook quan sát được lúc runtime.
+
+## Kiểm chứng và kiểm thử
+
+Chạy Pytest để kiểm chứng offline:
 
 ```bash
-# Run all unit tests
+# Chạy toàn bộ unit test
 pytest tests/unit/
 
-# Run tests with specific markers
+# Chạy test theo marker
 pytest -m unit
 pytest -m integration
 pytest -m speakeasy
 
-# Run smoke tests specifically
+# Chạy riêng smoke test
 pytest tests/unit/test_smoke.py
 
-# Run extractor and reporter tests
+# Chạy test cho extractor và reporter
 pytest tests/unit/test_extractor.py
 pytest tests/unit/test_reporter.py
 
-# Verbose output for detailed results
+# In output chi tiết
 pytest -v
 ```
