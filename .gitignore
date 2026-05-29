@@ -32,6 +32,7 @@ share/python-wheels/
 
 # Reports / Outputs
 report.json
+assert_t12.py
 *.json
 *.log
 output/
@@ -57,5 +58,6 @@ test.exe
 
 # OpenCode / AI Agents
 .omo/
+.codegraph/
 .agents/
 .opencode/
