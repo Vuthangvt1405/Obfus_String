@@ -41,12 +41,18 @@ class StringExtractor:
         if str_val:
             self._add_result(address, str_val, "UTF-16LE", source='mem_write')
 
-    def process_api_string(self, api_name, str_val):
+    def process_api_string(self, api_name, str_val, source_detail=None):
         """
         Ghi nhận chuỗi lấy trực tiếp từ tham số API (rất sạch).
+
+        Parameters:
+        - source_detail: optional metadata describing the specific API hook
+          family or variant (e.g. "WinHttpConnect", "InternetConnectA").
+          Stored verbatim in the result entry for reporters.
         """
         if str_val and len(str_val) >= self.min_length:
-             self._add_result(f"API_{api_name}", str_val, "API_ARG", source='api_hook')
+             self._add_result(f"API_{api_name}", str_val, "API_ARG",
+                              source='api_hook', source_detail=source_detail)
 
     def _extract_ascii(self, data):
         # Lấy dải ký tự in được liên tiếp
@@ -202,7 +208,8 @@ class StringExtractor:
             return True
         return False
 
-    def _add_result(self, location, content, encoding, source=None):
+    def _add_result(self, location, content, encoding, source=None,
+                    source_detail=None):
         """
         Purpose:
         Record an extracted string result, deduplicating by content and
@@ -212,14 +219,18 @@ class StringExtractor:
         How it works:
         Rejects noise via _is_noise(). On duplicate content, merges by
         elevating source to 'api_hook' if the new source is 'api_hook'.
-        Otherwise skips. Computes regex-based tags and attaches a `source`
-        field.
+        If the new call carries a source_detail but the existing entry
+        does not, it is populated. Computes regex-based tags and attaches
+        a `source` field. If source_detail is provided, it is stored as
+        an additional metadata field for reporters.
 
         Parameters:
         - location: virtual address or API name where the string was found.
         - content: the decoded string value.
         - encoding: "ASCII", "UTF-16LE", or "API_ARG".
         - source: optional provenance tag (None = omitted from entry).
+        - source_detail: optional metadata string describing the specific
+          API hook or family (e.g. "WinHttpConnect"). Stores None = omitted.
 
         Returns:
         None — results are appended to self.results.
@@ -233,6 +244,10 @@ class StringExtractor:
             if res['content'] == content:
                 if source == 'api_hook' and res.get('source') != 'api_hook':
                     res['source'] = 'api_hook'
+                # Populate source_detail if the new call provides it and
+                # the existing entry does not already have one.
+                if source_detail is not None and 'source_detail' not in res:
+                    res['source_detail'] = source_detail
                 return
 
         # Đánh label nếu khớp regex
