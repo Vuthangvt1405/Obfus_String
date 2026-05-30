@@ -10,9 +10,17 @@ class ReportGenerator:
     def __init__(self, output_path):
         self.output_path = output_path
 
-    def save(self, data_list):
+    def save(self, data_list, metadata=None):
         """
-        Lưu danh sách chuỗi trích xuất được ra file JSON
+        Lưu danh sách chuỗi trích xuất được ra file JSON.
+
+        Parameters:
+        - data_list: list of string entry dicts to save.
+        - metadata: optional dict injected under the "execution_constraints"
+          key at the report root. Pass None (default) to omit the key.
+
+        Returns:
+        None
         """
         if not data_list:
             logger.warning("[Reporter] Không có dữ liệu để kết xuất.")
@@ -23,6 +31,9 @@ class ReportGenerator:
             "total_strings": len(data_list),
             "strings": data_list
         }
+
+        if metadata is not None:
+            report["execution_constraints"] = metadata
 
         try:
             # Đảm bảo thư mục đích tồn tại

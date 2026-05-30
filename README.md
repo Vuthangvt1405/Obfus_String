@@ -50,33 +50,65 @@ python main.py -f payload.dll -d
 
 # Chỉ định thời gian giả lập tối đa 120s và thay đổi tên file lưu báo cáo chuỗi
 python main.py -f packed_malware.exe -t 120 -o unpacked_strings.json
+
+# Mẫu có tight-loop giải mã chuỗi, dừng khi đạt 30s hoặc 1 triệu lệnh
+python main.py -f tight_loop_sample.exe -t 30 --max-instructions 1000000 -o tight_loop_strings.json
 ```
+
+
+## Hướng dẫn analyst cho tight-loop và Safe-Stop
+
+Khi mẫu dùng vòng lặp giải mã chuỗi quá dài hoặc lặp trên cùng vùng nhớ, hãy đặt cả giới hạn thời gian và giới hạn số lệnh. Giới hạn nào chạm trước sẽ dừng emulation an toàn:
+
+```bash
+# Ưu tiên chạy nhanh để lấy chuỗi xuất hiện sớm trong behavior path
+python main.py -f sample.exe -t 15 --max-instructions 500000 -o quick_strings.json
+
+# Cho packed sample thêm thời gian, nhưng vẫn chặn tight-loop bằng trần lệnh
+python main.py -f packed_sample.exe -t 120 --max-instructions 5000000 -o packed_strings.json
+```
+
+Safe-Stop execution nghĩa là khi Speakeasy chạm `timeout` hoặc `max_instructions`, framework không coi đây là lỗi phân tích. Nó vẫn đọc report Speakeasy, quét các vùng nhớ đã ghi, rồi ghi `execution_constraints.stop_reason` vào JSON khi có chuỗi để lưu. Giá trị thường gặp là `completed`, `timeout`, `max_instructions` hoặc `unsupported_api`.
+
+Các writing hot spots là vùng nhớ bị ghi lặp lại nhiều lần, ví dụ vòng XOR hoặc RC4 ghi đè buffer giải mã. `WriteTracker` gộp vùng ghi, memory hook chụp snapshot có giới hạn khi vùng đó nóng, rồi bước scan cuối đọc lại vùng bẩn theo chunk. Cách này giúp bắt chuỗi ngắn sống tạm trong tight-loop, nhưng không đọc vô hạn: mỗi snapshot tối đa khoảng 4KB và mỗi vùng bẩn ở bước scan cuối tối đa khoảng 8192 byte.
+
+Giới hạn cần nhớ: kết quả là not static. Công cụ relies on behavior path mà emulator thật sự đi qua, hook đã cắm được và bộ nhớ còn đọc được khi dừng. Vì vậy báo cáo rỗng hoặc thiếu một chuỗi không chứng minh binary không có chuỗi đó. Nó chỉ nói rằng chuỗi chưa xuất hiện trên đường chạy đã quan sát, đã bị ghi đè trước snapshot, nằm ngoài giới hạn đọc hoặc phụ thuộc API chưa được Speakeasy hỗ trợ.
+
+## Phạm vi bắt chuỗi hiện tại
+
+| Loại chuỗi | Có xử lý không? | Cách hoạt động | Giới hạn |
+|---|---|---|---|
+| Static string | Có, mặc định | `load_sample()` chạy `core.static_scanner` trên raw file trước khi nạp Speakeasy. Scan này bắt ASCII/UTF-8-compatible strings và quan sát UTF-16LE bằng cùng bộ lọc với runtime scan, gắn `source="static_scan"`. | Đây là raw-byte scan có giới hạn, không phải cơ chế giải mã tĩnh hay decoder reversal. Chuỗi bị mã hóa hoặc nén vẫn phụ thuộc runtime behavior path. |
+| Stack string | Có, theo runtime | Khi malware build chuỗi trên stack hoặc heap, memory hook ghi nhận vùng bị write. `overwrite_history` giữ bounded pre-overwrite candidates khi buffer bị ghi đè, dirty-region scan đọc lại vùng bẩn cuối run, và API hook bắt nếu chuỗi được truyền vào Windows API. | Best-effort và bounded: phụ thuộc branch đã chạy, vùng nhớ còn đọc được, giới hạn history/snapshot, và thời điểm chuỗi bị ghi đè. |
+| Tight string / tight-loop decrypted string | Có, best-effort | `timeout` và `--max-instructions` chặn vòng lặp dài bằng Safe-Stop. `WriteTracker` đếm vùng ghi lặp; khi vùng đủ hot, hook đọc snapshot có giới hạn và scan ngay, rồi cuối run scan lại các dirty regions. | Không vượt qua vòng lặp giải mã và không hứa hẹn giải mọi thuật toán. Snapshot bị giới hạn kích thước để tránh treo emulator. |
+| Function-decoded string | Có nếu function thật sự chạy | Không có detector riêng cho hàm decode. Nếu hàm decode được emulation đi qua và output plaintext ra memory, Speakeasy report, dirty/deferred scan, API hook, hoặc bounded `register_scan` có thể bắt plaintext còn nằm trong register/pointer ứng viên. | Nếu function không được gọi, bị anti-emulation chặn, register không đọc được, hoặc plaintext bị xóa quá nhanh, report có thể thiếu chuỗi đó. Không bảo đảm khôi phục decoder. |
 
 ## Cách hoạt động
 
 Luồng chạy chính bắt đầu ở `main.py` và đi qua các bước sau:
 
-1. **Nhận tham số CLI:** `main.py` đọc đường dẫn mẫu PE (`-f`), timeout (`-t`), kiến trúc mong muốn (`-a`), file output (`-o`) và chế độ debug (`-d`).
+1. **Nhận tham số CLI:** `main.py` đọc đường dẫn mẫu PE (`-f`), timeout (`-t`), trần lệnh (`--max-instructions`), kiến trúc mong muốn (`-a`), file output (`-o`) và chế độ debug (`-d`).
 2. **Khởi tạo emulator:** `MalwareEmulator` tạo `StringExtractor`, `WriteTracker`, cấu hình timeout cho Speakeasy, rồi tạo sandbox Speakeasy tách biệt với hệ thống thật.
-3. **Nạp mẫu PE:** `load_sample()` gọi `se.load_module()` để nạp file PE vào không gian bộ nhớ giả lập. Khi bật debug, loader in thêm image base, entry point và section layout.
-4. **Đăng ký hook:** `register_hooks()` cắm hai nhóm cảm biến:
-   - `hooks/mem_hooks.py`: theo dõi các vùng nhớ bị ghi (`MEM_WRITE`) bằng `WriteTracker`.
+3. **Nạp mẫu PE:** `load_sample()` chạy default raw-file scan qua `core.static_scanner` trước, rồi gọi `se.load_module()` để nạp file PE vào không gian bộ nhớ giả lập. Khi bật debug, loader in thêm image base, entry point và section layout.
+4. **Đăng ký hook:** `register_hooks()` cắm ba nhóm cảm biến:
+   - `hooks/mem_hooks.py`: theo dõi các vùng nhớ bị ghi (`MEM_WRITE`) bằng `WriteTracker` và lưu bounded `overwrite_history` cho pre-overwrite candidates.
+   - `hooks/register_hooks.py`: chạy bounded `register_scan` qua code hook nếu engine hỗ trợ, rồi scan lần cuối sau khi run dừng.
    - `hooks/api_hooks.py`: hook các Windows API có tham số chuỗi để lấy chuỗi trực tiếp từ API arguments.
-5. **Chạy giả lập:** `run()` gọi `se.run_module()`. Nếu Speakeasy gặp API chưa hỗ trợ hoặc timeout, script ghi log và vẫn cố thu thập dữ liệu đã quan sát được.
-6. **Thu thập chuỗi:** Sau khi chạy, emulator lấy chuỗi từ Speakeasy JSON report, rồi đọc lại các vùng nhớ đã bị ghi để scan chuỗi ASCII và UTF-16LE theo từng chunk.
-7. **Lọc và gắn nhãn:** `StringExtractor` bỏ chuỗi nhiễu phổ biến, loại chuỗi quá ngắn, deduplicate theo `content`, gắn `source` (`api_hook`, `deferred_scan`, `mem_write`) và tag regex khi thấy IP, URL, domain hoặc registry path.
+5. **Chạy giả lập:** `run()` gọi `se.run_module()`. Nếu Speakeasy gặp API chưa hỗ trợ, timeout hoặc trần lệnh, script ghi log và vẫn cố thu thập dữ liệu đã quan sát được theo Safe-Stop.
+6. **Thu thập chuỗi:** Sau khi chạy, emulator lấy chuỗi từ Speakeasy JSON report, drain `overwrite_history`, chạy final `register_scan`, rồi đọc lại các vùng nhớ đã bị ghi để scan chuỗi ASCII và UTF-16LE theo từng chunk.
+7. **Lọc và gắn nhãn:** `StringExtractor` bỏ chuỗi nhiễu phổ biến, loại chuỗi quá ngắn, deduplicate theo `content`, gắn `source` (`static_scan`, `deferred_scan`, `overwrite_history`, `mem_write`, `register_scan`, `api_hook`) và tag regex khi thấy IP, URL, domain hoặc registry path.
 8. **Xuất báo cáo:** `ReportGenerator` ghi JSON gồm `timestamp`, `total_strings` và danh sách `strings` ra file output, mặc định là `report.json`.
 
-Kết quả phụ thuộc vào đường thực thi thực tế trong emulator. Script không giải mã tĩnh toàn bộ binary; nó chỉ thu được chuỗi xuất hiện trong report Speakeasy, memory writes hoặc API calls đã được hook trong lúc chạy.
+Kết quả phụ thuộc vào đường thực thi thực tế trong emulator. Script không giải mã tĩnh toàn bộ binary; nó chỉ thu được chuỗi quan sát được qua default static scan, report Speakeasy, overwrite history, memory writes, register scan hoặc API calls đã được hook trong lúc chạy.
 
 ## Quy trình bắt chuỗi lúc chạy (Deferred Memory Tracking)
 
 Để tránh xử lý từng byte khi malware giải mã chuỗi và để giảm chi phí hiệu năng, framework dùng mô hình thu thập bộ nhớ trì hoãn:
 
-- **Gộp vùng ghi bằng WriteTracker:** Memory hook (`MEM_WRITE`) chỉ lưu tuple nhẹ `(start, end)` thay vì giải mã ngay từng byte. Các vùng nhớ liền kề hoặc chồng lấn được gộp lại trong phạm vi nhìn ngược nhỏ (tối đa 10 vùng gần nhất).
-- **Trích xuất sau khi chạy:** Sau khi Speakeasy hoàn tất, `MalwareEmulator._extract_tracked_memory()` duyệt các vùng nhớ đã gộp, đọc theo chunk tối đa 4KB và đưa dữ liệu đã giải mã vào bộ lọc regex.
+- **Gộp vùng ghi bằng WriteTracker:** Memory hook (`MEM_WRITE`) lưu tuple nhẹ `(start, end)` cho dirty-region scan và lưu bounded `overwrite_history` khi một hot buffer sắp bị ghi đè. Các vùng nhớ liền kề hoặc chồng lấn được gộp lại trong phạm vi nhìn ngược nhỏ (tối đa 10 vùng gần nhất).
+- **Trích xuất sau khi chạy:** Sau khi Speakeasy hoàn tất, `MalwareEmulator._extract_tracked_memory()` xử lý `overwrite_history`, chạy final bounded `register_scan`, rồi duyệt các vùng nhớ đã gộp, đọc theo chunk tối đa 4KB và đưa dữ liệu đã giải mã vào bộ lọc regex.
 - **Đọc theo chunk và bỏ qua lỗi:** Bộ nhớ đã theo dõi được đọc theo từng chunk, giới hạn tối đa mỗi vùng bẩn khoảng 8192 byte. Nếu `se.mem_read()` lỗi vì vùng nhớ không hợp lệ, script ghi debug log và tiếp tục vùng khác.
-- **Giới hạn theo vùng PE:** Tracking chỉ phục vụ chuỗi xuất hiện trong quá trình giả lập. Script không cam kết giải mã tĩnh toàn bộ binary; khả năng thu hồi phụ thuộc vào đường chạy và hook quan sát được.
+- **Giới hạn theo vùng PE:** Tracking chỉ phục vụ chuỗi xuất hiện trong quá trình giả lập hoặc raw-file static scan mặc định. Script không cam kết giải mã tĩnh toàn bộ binary; khả năng thu hồi phụ thuộc vào đường chạy, hook quan sát được và các giới hạn bounded/best-effort.
 
 ## Phạm vi API hook
 
@@ -104,7 +136,7 @@ Factory hook chung sẽ chuyển chuỗi bắt được vào `StringExtractor.pr
 
 ## Ý nghĩa output cho analyst
 
-Output mặc định loại bỏ các chuỗi scaffold và chuỗi nhiễu phổ biến để báo cáo tập trung vào giá trị nhiều khả năng do malware kiểm soát, thay vì artifact của emulator hoặc test harness. Chuỗi quan sát qua API có thể có thêm metadata provenance như `source_detail`, nhưng schema JSON vẫn tương thích với consumer chỉ đọc các field cơ bản. Điều này không đồng nghĩa với giải mã tĩnh hoàn hảo, vì khả năng thu hồi vẫn phụ thuộc vào đường thực thi và hook quan sát được lúc runtime.
+Output mặc định loại bỏ các chuỗi scaffold và chuỗi nhiễu phổ biến để báo cáo tập trung vào giá trị nhiều khả năng do malware kiểm soát, thay vì artifact của emulator hoặc test harness. Chuỗi quan sát qua API có thể có thêm metadata provenance như `source_detail`, nhưng schema JSON vẫn tương thích với consumer chỉ đọc các field cơ bản. Điều này không phải là bằng chứng giải mã tĩnh đầy đủ, vì khả năng thu hồi vẫn phụ thuộc vào đường thực thi, behavior path và hook quan sát được lúc runtime.
 
 ## Kiểm chứng và kiểm thử
 

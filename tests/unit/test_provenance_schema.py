@@ -49,6 +49,23 @@ ENTRY_API = {
     "tags": [],
 }
 
+ENTRY_STATIC_SCAN = {
+    "location": "0xABCD",
+    "encoding": "ASCII",
+    "content": "static_scan_result",
+    "tags": ["Matched_Regex"],
+    "source": "static_scan",
+}
+
+ENTRY_STATIC_SCAN_WITH_REGISTER = {
+    "location": "0xDCBA",
+    "encoding": "UTF-16LE",
+    "content": "register_scan_result",
+    "tags": [],
+    "source": "static_scan",
+    "register_scan": "eax",
+}
+
 # The set of fields that MUST exist in every entry
 REQUIRED_FIELDS = {"location", "encoding", "content", "tags"}
 
@@ -193,6 +210,74 @@ class TestOptionalFieldsPreserved:
             assert isinstance(entry["tags"], list), f"Entry {i}: tags not list"
 
     @pytest.mark.unit
+    def test_source_static_scan_round_trip(self, tmp_path):
+        """
+        An entry with source='static_scan' must survive save -> load
+        via ReportGenerator without losing the field.
+        """
+        data_list = [ENTRY_STATIC_SCAN.copy()]
+        out = tmp_path / "static_scan_round_trip.json"
+        reporter = ReportGenerator(str(out))
+        reporter.save(data_list)
+
+        with open(out) as f:
+            report = json.load(f)
+
+        saved = report["strings"][0]
+        assert saved["source"] == "static_scan"
+        # Required fields unchanged
+        assert saved["location"] == "0xABCD"
+        assert saved["content"] == "static_scan_result"
+        assert saved["encoding"] == "ASCII"
+        assert saved["tags"] == ["Matched_Regex"]
+
+    @pytest.mark.unit
+    def test_source_static_scan_with_multiple_sources(self, tmp_path):
+        """
+        A batch mixing static_scan entries with other sources preserves
+        each entry's source value independently.
+        """
+        data_list = [
+            ENTRY_WITH_EXTRAS.copy(),     # source='memory_write'
+            ENTRY_STATIC_SCAN.copy(),     # source='static_scan'
+            ENTRY_API.copy(),             # no source field
+        ]
+        out = tmp_path / "mixed_sources.json"
+        reporter = ReportGenerator(str(out))
+        reporter.save(data_list)
+
+        with open(out) as f:
+            report = json.load(f)
+
+        entries = {e["content"]: e for e in report["strings"]}
+        assert entries["extra_fields_preserved"]["source"] == "memory_write"
+        assert entries["static_scan_result"]["source"] == "static_scan"
+        assert "source" not in entries["api_captured_string"]
+
+    @pytest.mark.unit
+    def test_register_scan_round_trip(self, tmp_path):
+        """
+        An entry with register_scan must survive save -> load
+        via ReportGenerator without losing the field.
+        """
+        data_list = [ENTRY_STATIC_SCAN_WITH_REGISTER.copy()]
+        out = tmp_path / "register_scan_round_trip.json"
+        reporter = ReportGenerator(str(out))
+        reporter.save(data_list)
+
+        with open(out) as f:
+            report = json.load(f)
+
+        saved = report["strings"][0]
+        assert saved["source"] == "static_scan"
+        assert saved["register_scan"] == "eax"
+        # Required fields unchanged
+        assert saved["location"] == "0xDCBA"
+        assert saved["content"] == "register_scan_result"
+        assert saved["encoding"] == "UTF-16LE"
+        assert saved["tags"] == []
+
+    @pytest.mark.unit
     def test_optional_fields_never_overwrite_required(self, tmp_path):
         """
         Extra fields with names differing from required fields must not
@@ -262,3 +347,29 @@ class TestReportEnvelope:
         assert result is None
         # File should not have been created
         assert not out.exists()
+
+    @pytest.mark.unit
+    def test_execution_constraints_layer(self, tmp_path):
+        """
+        execution_constraints injected by save() with metadata must not break
+        the top-level envelope contract (timestamp, total_strings, strings).
+        """
+        data_list = [MINIMAL_ENTRY.copy()]
+        meta = {"timeout": 120, "arch": "x86"}
+        out = tmp_path / "envelope_with_constraints.json"
+        reporter = ReportGenerator(str(out))
+        reporter.save(data_list, metadata=meta)
+
+        with open(out) as f:
+            report = json.load(f)
+
+        # Envelope contract still satisfied
+        assert "timestamp" in report
+        assert "total_strings" in report
+        assert "strings" in report
+        assert report["total_strings"] == 1
+        assert len(report["strings"]) == 1
+
+        # execution_constraints present and correct
+        assert "execution_constraints" in report
+        assert report["execution_constraints"] == meta

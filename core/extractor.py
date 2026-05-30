@@ -6,11 +6,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 class StringExtractor:
-    def __init__(self, min_length=4):
+    def __init__(self, min_length=4, max_results=0):
         """
-        Bộ lọc chuỗi (Heuristics)
+        Purpose:
+        Initialise the StringExtractor with configurable minimum string length,
+        result-size cap, and printable-character set.
+
+        How it works:
+        Sets up the printable ASCII filter set, compiles heuristic regex patterns
+        for IPs/URLs/domains/registry paths, and records an optional result cap
+        (0 = unlimited).
+
+        Parameters:
+        - min_length: minimum character length for a string to be retained.
+        - max_results: maximum number of unique results to store (0 = unlimited).
+
+        Returns:
+        void
         """
         self.min_length = min_length
+        self.max_results = max_results
         self.valid_chars = set(string.printable.encode('ascii'))
         self.results = []
         
@@ -53,6 +68,33 @@ class StringExtractor:
         if str_val and len(str_val) >= self.min_length:
              self._add_result(f"API_{api_name}", str_val, "API_ARG",
                               source='api_hook', source_detail=source_detail)
+
+    def ingest_candidate(self, content, source, location=None, source_detail=None):
+        """
+        Purpose:
+        Record a candidate string with explicit provenance, without tying it
+        to a specific capture path (mem_write / api_hook / deferred_scan).
+
+        How it works:
+        Validates the string meets min_length, delegates to _add_result with
+        encoding "CANDIDATE" and the given source/location/source_detail.
+        Dedup and result-cap logic inside _add_result apply uniformly.
+
+        Parameters:
+        - content: the candidate string.
+        - source: provenance tag (e.g. 'static_scan', 'overwrite_history',
+          'register_scan').
+        - location: optional source identifier (defaults to "candidate").
+        - source_detail: optional metadata string for reporters.
+
+        Returns:
+        void
+        """
+        if not content or len(content) < self.min_length:
+            return
+        loc = location if location is not None else "candidate"
+        self._add_result(loc, content, "CANDIDATE", source=source,
+                         source_detail=source_detail)
 
     def _extract_ascii(self, data):
         # Lấy dải ký tự in được liên tiếp
@@ -186,6 +228,15 @@ class StringExtractor:
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
     })
 
+    _SOURCE_PRIORITY = {
+        "static_scan": 10,
+        "deferred_scan": 20,
+        "overwrite_history": 30,
+        "mem_write": 40,
+        "register_scan": 50,
+        "api_hook": 60,
+    }
+
     def _is_noise(self, content):
         """
         Purpose:
@@ -217,12 +268,12 @@ class StringExtractor:
         the same content.
 
         How it works:
-        Rejects noise via _is_noise(). On duplicate content, merges by
-        elevating source to 'api_hook' if the new source is 'api_hook'.
-        If the new call carries a source_detail but the existing entry
-        does not, it is populated. Computes regex-based tags and attaches
-        a `source` field. If source_detail is provided, it is stored as
-        an additional metadata field for reporters.
+        Rejects noise via _is_noise(). On duplicate content, compares the
+        configured provenance priority for the existing and new source; when
+        the new source is higher confidence, it replaces the stored source
+        and any provided source_detail. Same-priority duplicates can fill a missing
+        source_detail. New unique results still get regex tags and optional
+        provenance metadata.
 
         Parameters:
         - location: virtual address or API name where the string was found.
@@ -239,16 +290,29 @@ class StringExtractor:
         if self._is_noise(content):
             return
 
-        # Dedup with provenance merge: api_hook elevates over other sources
         for res in self.results:
             if res['content'] == content:
-                if source == 'api_hook' and res.get('source') != 'api_hook':
-                    res['source'] = 'api_hook'
-                # Populate source_detail if the new call provides it and
-                # the existing entry does not already have one.
-                if source_detail is not None and 'source_detail' not in res:
+                current_priority = self._SOURCE_PRIORITY.get(res.get('source'), 0)
+                new_priority = (
+                    self._SOURCE_PRIORITY.get(source, 0)
+                    if source is not None
+                    else 0
+                )
+                if new_priority > current_priority and source is not None:
+                    res['source'] = source
+                    if source_detail is not None:
+                        res['source_detail'] = source_detail
+                elif (
+                    new_priority == current_priority
+                    and source_detail is not None
+                    and 'source_detail' not in res
+                ):
                     res['source_detail'] = source_detail
                 return
+
+        # Respect result cap — only check when we would append a new entry
+        if self.max_results > 0 and len(self.results) >= self.max_results:
+            return
 
         # Đánh label nếu khớp regex
         tags = []
@@ -269,6 +333,8 @@ class StringExtractor:
         }
         if source is not None:
             entry["source"] = source
+        if source_detail is not None:
+            entry["source_detail"] = source_detail
         self.results.append(entry)
         logger.debug(f"[Extractor] Đã bắt được chuỗi: '{content}' (Tại: {location})")
 

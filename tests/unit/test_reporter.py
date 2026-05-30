@@ -107,3 +107,161 @@ class TestReportGenerator:
         generator.save([])
 
         assert not output.exists()
+
+    # ------------------------------------------------------------------
+    # Metadata / execution_constraints
+    # ------------------------------------------------------------------
+
+    def test_save_without_metadata_omits_execution_constraints(self, tmp_path) -> None:
+        """save() called without metadata does not inject execution_constraints."""
+        output = tmp_path / "no_metadata.json"
+        generator = ReportGenerator(str(output))
+        generator.save([{"content": "test"}])
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert "execution_constraints" not in report
+
+    def test_save_with_metadata_injects_execution_constraints(self, tmp_path) -> None:
+        """save() called with metadata injects it under execution_constraints."""
+        output = tmp_path / "with_metadata.json"
+        generator = ReportGenerator(str(output))
+        meta = {"timeout": 60, "arch": "x86"}
+        generator.save([{"content": "test"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert "execution_constraints" in report
+        assert report["execution_constraints"] == meta
+        # Legacy keys unchanged
+        assert report["total_strings"] == 1
+        assert len(report["strings"]) == 1
+
+    def test_save_with_metadata_none_omits_execution_constraints(self, tmp_path) -> None:
+        """Passing metadata=None explicitly behaves the same as omitting it."""
+        output = tmp_path / "explicit_none.json"
+        generator = ReportGenerator(str(output))
+        generator.save([{"content": "test"}], metadata=None)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert "execution_constraints" not in report
+
+    # ------------------------------------------------------------------
+    # Execution-status metadata integration (Task 9)
+    # ------------------------------------------------------------------
+
+    def test_save_with_stop_reason_metadata(self, tmp_path) -> None:
+        """
+        save() with stop_reason metadata injects it under
+        execution_constraints.  This replicates what main.py does when
+        emu.execution_status is set.
+        """
+        output = tmp_path / "stop_reason.json"
+        generator = ReportGenerator(str(output))
+        meta = {"stop_reason": "completed"}
+        generator.save([{"content": "data"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert report["execution_constraints"] == {"stop_reason": "completed"}
+        assert report["total_strings"] == 1
+
+    def test_save_with_constrained_stop_reason(self, tmp_path) -> None:
+        """
+        A constrained emulation (e.g. timeout) produces a
+        stop_reason that is not 'completed'.
+        """
+        output = tmp_path / "constrained.json"
+        generator = ReportGenerator(str(output))
+        meta = {"stop_reason": "timeout"}
+        generator.save([{"content": "partial"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert report["execution_constraints"]["stop_reason"] == "timeout"
+
+    def test_main_metadata_structure(self, tmp_path) -> None:
+        """
+        The metadata dict structure that main.py builds
+        (``{"stop_reason": emu.execution_status}``) is compatible
+        with ReportGenerator.save().
+        """
+        for status in ("completed", "timeout", "unsupported_api", "error"):
+            output = tmp_path / f"status_{status}.json"
+            generator = ReportGenerator(str(output))
+            generator.save([{"content": "x"}], metadata={"stop_reason": status})
+
+            with open(output, "r") as f:
+                report = json.load(f)
+
+            assert report["execution_constraints"] == {"stop_reason": status}
+
+    # ------------------------------------------------------------------
+    # New capture source metadata (Task 5)
+    # ------------------------------------------------------------------
+
+    def test_save_with_overwrite_history_metadata(self, tmp_path) -> None:
+        """
+        save() with overwrite_history in metadata injects it under
+        execution_constraints without breaking the envelope contract.
+        """
+        output = tmp_path / "overwrite_history.json"
+        generator = ReportGenerator(str(output))
+        meta = {"overwrite_history": True, "stop_reason": "completed"}
+        generator.save([{"content": "test"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert report["execution_constraints"]["overwrite_history"] is True
+        assert report["execution_constraints"]["stop_reason"] == "completed"
+        # Envelope unchanged
+        assert "timestamp" in report
+        assert report["total_strings"] == 1
+        assert len(report["strings"]) == 1
+
+    def test_save_with_register_scan_metadata(self, tmp_path) -> None:
+        """
+        save() with register_scan in metadata injects it under
+        execution_constraints without breaking the envelope contract.
+        """
+        output = tmp_path / "register_scan_meta.json"
+        generator = ReportGenerator(str(output))
+        meta = {"register_scan": "all", "stop_reason": "completed"}
+        generator.save([{"content": "data"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert report["execution_constraints"]["register_scan"] == "all"
+        # Envelope unchanged
+        assert report["total_strings"] == 1
+        assert len(report["strings"]) == 1
+
+    def test_save_with_both_new_metadata_fields(self, tmp_path) -> None:
+        """
+        save() with both overwrite_history and register_scan in metadata
+        preserves both fields independently.
+        """
+        output = tmp_path / "both_new_metadata.json"
+        generator = ReportGenerator(str(output))
+        meta = {
+            "overwrite_history": False,
+            "register_scan": "ebx",
+            "stop_reason": "completed",
+        }
+        generator.save([{"content": "both"}], metadata=meta)
+
+        with open(output, "r") as f:
+            report = json.load(f)
+
+        assert report["execution_constraints"]["overwrite_history"] is False
+        assert report["execution_constraints"]["register_scan"] == "ebx"
+        assert report["execution_constraints"]["stop_reason"] == "completed"
+        assert report["total_strings"] == 1
