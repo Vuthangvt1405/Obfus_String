@@ -8,7 +8,6 @@ from hooks.mem_hooks import WriteTracker, setup_memory_hooks
 from hooks.api_hooks import setup_api_hooks
 from hooks.register_hooks import scan_register_candidates, setup_register_hooks
 from core.extractor import StringExtractor
-from core.static_scanner import scan_file
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +69,11 @@ class MalwareEmulator:
     def load_sample(self, file_path):
         """
         Purpose:
-        Static-scan the sample bytes, then load the PE into Speakeasy memory.
+        Load the sample into Speakeasy memory for runtime emulation.
 
         How it works:
-        Reads the file through the static scanner into the shared
-        StringExtractor, treats scanner errors as non-fatal, then delegates to
-        Speakeasy.load_module() and logs loader metadata.
+        Delegates directly to Speakeasy.load_module() and logs loader metadata
+        after Speakeasy accepts the module.
 
         Parameters:
         - file_path: path to the sample PE or binary blob being analyzed.
@@ -85,15 +83,6 @@ class MalwareEmulator:
         """
         try:
             logger.info(f"[Loader] Đang đọc file PE: {file_path}")
-            try:
-                static_findings = scan_file(file_path, self.extractor)
-                if static_findings:
-                    logger.info(
-                        f"[Loader] Static scan captured {len(static_findings)} strings before emulation."
-                    )
-            except Exception as e:
-                logger.debug(f"[Loader] Static scan skipped after error: {e}")
-
             self.module = self.se.load_module(file_path)
 
             base_addr = self.module.base
@@ -123,9 +112,10 @@ class MalwareEmulator:
         Register all runtime capture hooks supported by the current engine.
 
         How it works:
-        Installs memory-write tracking, API argument capture, and optional
-        register code-hook scanning. Register hook setup is non-fatal when the
-        engine lacks code-hook support because run() also performs a final scan.
+        Installs memory-write tracking, API argument capture, optional
+        execute-after-write snapshots, and register code-hook scanning. Register
+        hook setup is non-fatal when the engine lacks code-hook support because
+        run() also performs a final scan.
 
         Parameters:
         None.
@@ -136,7 +126,11 @@ class MalwareEmulator:
         logger.info("[Emulator] Đang cắm các cảm biến Hooks (Mem, API & Register)...")
         setup_memory_hooks(self.se, self.extractor, tracker=self.tracker)
         setup_api_hooks(self.se, self.extractor)
-        setup_register_hooks(self.se, self.extractor)
+        setup_register_hooks(
+            self.se,
+            self.extractor,
+            execute_after_write_tracker=self.tracker,
+        )
 
     def run(self):
         """
@@ -221,8 +215,9 @@ class MalwareEmulator:
         Drain bounded memory-write observations after emulation stops.
 
         How it works:
-        First scans retained overwrite candidates and labels newly discovered
-        strings as overwrite_history, then scans coalesced dirty regions in
+        First scans retained execute-after-write snapshots and labels newly
+        discovered strings as execute_after_write. Then it scans retained
+        overwrite candidates as overwrite_history and coalesced dirty regions in
         capped chunks as the existing deferred-scan fallback.
 
         Parameters:
@@ -231,6 +226,14 @@ class MalwareEmulator:
         Returns:
         None.
         """
+        execute_after_write_candidates = self.tracker.get_execute_after_write_candidates()
+        for candidate_addr, candidate_data in execute_after_write_candidates:
+            before_count = len(self.extractor.get_results())
+            self.extractor.scan_buffer(candidate_addr, candidate_data)
+            for result in self.extractor.get_results()[before_count:]:
+                if result.get('source') == 'deferred_scan':
+                    result['source'] = 'execute_after_write'
+
         tracker_candidates = self.tracker.get_candidates()
         for candidate_addr, candidate_data in tracker_candidates:
             before_count = len(self.extractor.get_results())
