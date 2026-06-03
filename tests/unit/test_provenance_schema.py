@@ -49,20 +49,20 @@ ENTRY_API = {
     "tags": [],
 }
 
-ENTRY_STATIC_SCAN = {
+ENTRY_DEFERRED_SCAN = {
     "location": "0xABCD",
     "encoding": "ASCII",
-    "content": "static_scan_result",
+    "content": "deferred_scan_result",
     "tags": ["Matched_Regex"],
-    "source": "static_scan",
+    "source": "deferred_scan",
 }
 
-ENTRY_STATIC_SCAN_WITH_REGISTER = {
+ENTRY_REGISTER_SCAN = {
     "location": "0xDCBA",
     "encoding": "UTF-16LE",
     "content": "register_scan_result",
     "tags": [],
-    "source": "static_scan",
+    "source": "register_scan",
     "register_scan": "eax",
 }
 
@@ -210,13 +210,13 @@ class TestOptionalFieldsPreserved:
             assert isinstance(entry["tags"], list), f"Entry {i}: tags not list"
 
     @pytest.mark.unit
-    def test_source_static_scan_round_trip(self, tmp_path):
+    def test_source_deferred_scan_round_trip(self, tmp_path):
         """
-        An entry with source='static_scan' must survive save -> load
+        An entry with source='deferred_scan' must survive save -> load
         via ReportGenerator without losing the field.
         """
-        data_list = [ENTRY_STATIC_SCAN.copy()]
-        out = tmp_path / "static_scan_round_trip.json"
+        data_list = [ENTRY_DEFERRED_SCAN.copy()]
+        out = tmp_path / "deferred_scan_round_trip.json"
         reporter = ReportGenerator(str(out))
         reporter.save(data_list)
 
@@ -224,22 +224,22 @@ class TestOptionalFieldsPreserved:
             report = json.load(f)
 
         saved = report["strings"][0]
-        assert saved["source"] == "static_scan"
+        assert saved["source"] == "deferred_scan"
         # Required fields unchanged
         assert saved["location"] == "0xABCD"
-        assert saved["content"] == "static_scan_result"
+        assert saved["content"] == "deferred_scan_result"
         assert saved["encoding"] == "ASCII"
         assert saved["tags"] == ["Matched_Regex"]
 
     @pytest.mark.unit
-    def test_source_static_scan_with_multiple_sources(self, tmp_path):
+    def test_source_deferred_scan_with_multiple_sources(self, tmp_path):
         """
-        A batch mixing static_scan entries with other sources preserves
+        A batch mixing deferred_scan entries with other sources preserves
         each entry's source value independently.
         """
         data_list = [
             ENTRY_WITH_EXTRAS.copy(),     # source='memory_write'
-            ENTRY_STATIC_SCAN.copy(),     # source='static_scan'
+            ENTRY_DEFERRED_SCAN.copy(),   # source='deferred_scan'
             ENTRY_API.copy(),             # no source field
         ]
         out = tmp_path / "mixed_sources.json"
@@ -251,7 +251,7 @@ class TestOptionalFieldsPreserved:
 
         entries = {e["content"]: e for e in report["strings"]}
         assert entries["extra_fields_preserved"]["source"] == "memory_write"
-        assert entries["static_scan_result"]["source"] == "static_scan"
+        assert entries["deferred_scan_result"]["source"] == "deferred_scan"
         assert "source" not in entries["api_captured_string"]
 
     @pytest.mark.unit
@@ -260,7 +260,7 @@ class TestOptionalFieldsPreserved:
         An entry with register_scan must survive save -> load
         via ReportGenerator without losing the field.
         """
-        data_list = [ENTRY_STATIC_SCAN_WITH_REGISTER.copy()]
+        data_list = [ENTRY_REGISTER_SCAN.copy()]
         out = tmp_path / "register_scan_round_trip.json"
         reporter = ReportGenerator(str(out))
         reporter.save(data_list)
@@ -269,7 +269,7 @@ class TestOptionalFieldsPreserved:
             report = json.load(f)
 
         saved = report["strings"][0]
-        assert saved["source"] == "static_scan"
+        assert saved["source"] == "register_scan"
         assert saved["register_scan"] == "eax"
         # Required fields unchanged
         assert saved["location"] == "0xDCBA"

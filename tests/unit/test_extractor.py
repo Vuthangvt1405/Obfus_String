@@ -584,12 +584,12 @@ class TestProvenanceMerge:
 class TestMultiSourcePriority:
     """Duplicate content keeps one entry while source confidence is elevated."""
 
-    def test_multi_source_register_elevates_static_without_duplicate(self) -> None:
-        """register_scan evidence outranks a static_scan duplicate."""
+    def test_multi_source_register_elevates_deferred_without_duplicate(self) -> None:
+        """register_scan evidence outranks a deferred_scan duplicate."""
         ext = StringExtractor(min_length=4)
         ext.ingest_candidate(
             "priority_shared",
-            source="static_scan",
+            source="deferred_scan",
             location=".rdata:0x10",
             source_detail="section:.rdata",
         )
@@ -631,11 +631,8 @@ class TestMultiSourcePriority:
         assert results[0]["source_detail"] == "WinHttpConnect"
 
     def test_multi_source_priority_chain_promotes_all_capture_paths(self) -> None:
-        """Source priority climbs static -> deferred -> overwrite -> register -> API."""
+        """Source priority climbs deferred -> overwrite -> execute -> register -> API."""
         ext = StringExtractor(min_length=4)
-
-        ext.ingest_candidate("chain_shared", source="static_scan")
-        assert ext.get_results()[0]["source"] == "static_scan"
 
         ext.scan_buffer(0x1000, b"\xffchain_shared\xff")
         assert len(ext.get_results()) == 1
@@ -645,6 +642,10 @@ class TestMultiSourcePriority:
         assert len(ext.get_results()) == 1
         assert ext.get_results()[0]["source"] == "overwrite_history"
 
+        ext.ingest_candidate("chain_shared", source="execute_after_write")
+        assert len(ext.get_results()) == 1
+        assert ext.get_results()[0]["source"] == "execute_after_write"
+
         ext.ingest_candidate("chain_shared", source="register_scan")
         assert len(ext.get_results()) == 1
         assert ext.get_results()[0]["source"] == "register_scan"
@@ -653,8 +654,8 @@ class TestMultiSourcePriority:
         assert len(ext.get_results()) == 1
         assert ext.get_results()[0]["source"] == "api_hook"
 
-    def test_multi_source_lower_priority_static_cannot_demote_api_hook(self) -> None:
-        """A later static duplicate must not replace api_hook provenance."""
+    def test_multi_source_lower_priority_deferred_cannot_demote_api_hook(self) -> None:
+        """A later deferred duplicate must not replace api_hook provenance."""
         ext = StringExtractor(min_length=4)
         ext.process_api_string(
             "WinHttpConnect",
@@ -663,7 +664,7 @@ class TestMultiSourcePriority:
         )
         ext.ingest_candidate(
             "api_pinned_shared",
-            source="static_scan",
+            source="deferred_scan",
             source_detail="section:.rdata",
         )
 
@@ -683,14 +684,14 @@ class TestCandidateIngestion:
     """ingest_candidate() records strings with explicit provenance without
     tying them to a specific capture path."""
 
-    def test_static_scan_provenance(self) -> None:
-        """String ingested with source='static_scan' carries that provenance."""
+    def test_deferred_scan_provenance(self) -> None:
+        """String ingested with source='deferred_scan' carries that provenance."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("static_scan_string", source="static_scan")
+        ext.ingest_candidate("deferred_scan_string", source="deferred_scan")
         results = ext.get_results()
         assert len(results) == 1
-        assert results[0]["content"] == "static_scan_string"
-        assert results[0]["source"] == "static_scan"
+        assert results[0]["content"] == "deferred_scan_string"
+        assert results[0]["source"] == "deferred_scan"
         assert results[0]["encoding"] == "CANDIDATE"
 
     def test_overwrite_history_provenance(self) -> None:
@@ -701,6 +702,15 @@ class TestCandidateIngestion:
         assert len(results) == 1
         assert results[0]["content"] == "overwrite_string"
         assert results[0]["source"] == "overwrite_history"
+
+    def test_execute_after_write_provenance(self) -> None:
+        """String ingested with source='execute_after_write' carries that provenance."""
+        ext = StringExtractor(min_length=4)
+        ext.ingest_candidate("execute_after_write_string", source="execute_after_write")
+        results = ext.get_results()
+        assert len(results) == 1
+        assert results[0]["content"] == "execute_after_write_string"
+        assert results[0]["source"] == "execute_after_write"
 
     def test_register_scan_provenance(self) -> None:
         """String ingested with source='register_scan' carries that provenance."""
@@ -714,34 +724,34 @@ class TestCandidateIngestion:
     def test_candidate_too_short_is_skipped(self) -> None:
         """Short strings via ingest_candidate are rejected."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("ab", source="static_scan")
+        ext.ingest_candidate("ab", source="deferred_scan")
         assert ext.get_results() == []
 
     def test_candidate_empty_is_skipped(self) -> None:
         """Empty or None content is skipped."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("", source="static_scan")
-        ext.ingest_candidate(None, source="static_scan")
+        ext.ingest_candidate("", source="deferred_scan")
+        ext.ingest_candidate(None, source="deferred_scan")
         assert ext.get_results() == []
 
     def test_candidate_location_parameter(self) -> None:
         """Optional location parameter is stored for candidate entries."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("loc_test", source="static_scan", location=".text:0x1234")
+        ext.ingest_candidate("loc_test", source="deferred_scan", location=".text:0x1234")
         entry = ext.get_results()[0]
         assert entry["location"] == ".text:0x1234"
 
     def test_candidate_default_location(self) -> None:
         """Default location is 'candidate' when not provided."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("default_loc", source="static_scan")
+        ext.ingest_candidate("default_loc", source="deferred_scan")
         entry = ext.get_results()[0]
         assert entry["location"] == "candidate"
 
     def test_candidate_source_detail(self) -> None:
         """source_detail is preserved from candidate ingestion."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("detail_test", source="static_scan",
+        ext.ingest_candidate("detail_test", source="deferred_scan",
                               source_detail="YARA:rule_win32_api")
         entry = ext.get_results()[0]
         assert entry["source_detail"] == "YARA:rule_win32_api"
@@ -749,7 +759,7 @@ class TestCandidateIngestion:
     def test_candidate_dedup_with_same_content_api_hook_wins(self) -> None:
         """When same content seen via candidate then api_hook, api_hook elevates."""
         ext = StringExtractor(min_length=4)
-        ext.ingest_candidate("shared", source="static_scan")
+        ext.ingest_candidate("shared", source="deferred_scan")
         ext.process_api_string("some_api", "shared")
         results = ext.get_results()
         assert len(results) == 1
@@ -759,7 +769,7 @@ class TestCandidateIngestion:
         """When candidate content is a duplicate, location of the first entry is kept."""
         ext = StringExtractor(min_length=4)
         ext.process_memory_write(0x1000, b"shared_content")
-        ext.ingest_candidate("shared_content", source="static_scan")
+        ext.ingest_candidate("shared_content", source="deferred_scan")
         results = ext.get_results()
         assert len(results) == 1
         # First entry source (mem_write) is kept — new provenance does not override
@@ -770,7 +780,7 @@ class TestCandidateIngestion:
         """Candidate with lower-provenance cannot knock api_hook down."""
         ext = StringExtractor(min_length=4)
         ext.process_api_string("some_api", "shared_content")
-        ext.ingest_candidate("shared_content", source="static_scan")
+        ext.ingest_candidate("shared_content", source="deferred_scan")
         results = ext.get_results()
         assert len(results) == 1
         assert results[0]["source"] == "api_hook"  # api_hook preserved
@@ -827,7 +837,7 @@ class TestResultCap:
         ext = StringExtractor(min_length=4, max_results=2)
         ext.process_memory_write(0x1000, b"abcd")
         ext.process_api_string("api1", "efgh")
-        ext.ingest_candidate("ijkl", source="static_scan")
+        ext.ingest_candidate("ijkl", source="deferred_scan")
         assert len(ext.get_results()) == 2
         contents = [r["content"] for r in ext.get_results()]
         assert "abcd" in contents

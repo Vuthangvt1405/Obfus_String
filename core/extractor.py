@@ -82,8 +82,8 @@ class StringExtractor:
 
         Parameters:
         - content: the candidate string.
-        - source: provenance tag (e.g. 'static_scan', 'overwrite_history',
-          'register_scan').
+        - source: provenance tag (e.g. 'overwrite_history',
+          'execute_after_write', 'mem_write', 'register_scan').
         - location: optional source identifier (defaults to "candidate").
         - source_detail: optional metadata string for reporters.
 
@@ -229,10 +229,10 @@ class StringExtractor:
     })
 
     _SOURCE_PRIORITY = {
-        "static_scan": 10,
         "deferred_scan": 20,
         "overwrite_history": 30,
         "mem_write": 40,
+        "execute_after_write": 45,
         "register_scan": 50,
         "api_hook": 60,
     }
