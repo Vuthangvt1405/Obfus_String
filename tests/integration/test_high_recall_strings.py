@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false
+# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportImplicitOverride=false
 """Integration coverage for high-recall function-decoded string outputs."""
 
 import json
@@ -10,7 +10,8 @@ import pytest
 
 from core.emulator import MalwareEmulator
 from core.extractor import StringExtractor
-from hooks.mem_hooks import WriteTracker
+from hooks.mem_hooks import MAX_EXECUTE_AFTER_WRITE_SNAPSHOTS, WriteTracker
+from hooks.register_hooks import DEFAULT_MAX_CODE_HOOK_SCANS
 
 
 ApiCallback = Callable[[object, str, object, list[object]], None]
@@ -24,10 +25,10 @@ class FunctionDecodedEngine:
     Simulate a Speakeasy-like engine that exposes decoded function outputs.
 
     How it works:
-    Stores bytes in a virtual memory map, records production hooks installed by
-    MalwareEmulator.register_hooks(), and run_module() simulates a decoder
-    function writing plaintext, passing it to an API, and returning a pointer in
-    a register.
+    Stores pending decoded outputs outside virtual memory, records production
+    hooks installed by MalwareEmulator.register_hooks(), and run_module()
+    simulates a decoder function writing plaintext, passing it to an API, and
+    returning a pointer in a register.
 
     Parameters:
     - memory_output: Plaintext bytes written by the simulated decode function.
@@ -51,6 +52,23 @@ class FunctionDecodedEngine:
         register_output: bytes,
         bad_pointers: set[int] | None = None,
     ) -> None:
+        """
+        Purpose:
+        Initialise a fake runtime decoder engine with plaintext not yet mapped.
+
+        How it works:
+        Stores decoded outputs as pending values, leaves virtual memory empty,
+        and prepares hook/register bookkeeping that run_module() will populate.
+
+        Parameters:
+        - memory_output: Plaintext bytes written during simulated execution.
+        - api_output: Plaintext API argument written during simulated execution.
+        - register_output: Plaintext bytes pointed to during simulated execution.
+        - bad_pointers: Optional unreadable addresses used to prove safe skips.
+
+        Returns:
+        void
+        """
         self.memory_output: bytes = memory_output
         self.api_output: str = api_output
         self.register_output: bytes = register_output
@@ -67,8 +85,22 @@ class FunctionDecodedEngine:
         self.mem_read_calls: list[tuple[int, int]] = []
         self.read_mem_string_calls: list[tuple[int, int]] = []
 
-        self._write_bytes(self.API_ADDRESS, api_output.encode("ascii") + b"\x00")
-        self._write_bytes(self.REGISTER_ADDRESS, register_output)
+    def has_mapped_runtime_plaintext(self) -> bool:
+        """
+        Purpose:
+        Report whether the fake decoder has mapped any plaintext bytes yet.
+
+        How it works:
+        Checks the virtual memory map that run_module() populates during the
+        simulated self-decode path.
+
+        Parameters:
+        None.
+
+        Returns:
+        True when any runtime plaintext bytes are mapped, otherwise False.
+        """
+        return bool(self._memory)
 
     def add_mem_write_hook(self, callback: MemWriteCallback) -> None:
         """
@@ -135,9 +167,9 @@ class FunctionDecodedEngine:
 
         How it works:
         Records the module, writes decoded memory output in two adjacent chunks,
-        points eax at another decoded output, fires code hooks for register
-        capture, then invokes lstrcpyA with a decoded API argument and one bad
-        pointer to prove bad pointers do not crash extraction.
+        maps another decoded output before pointing eax at it, fires code hooks
+        for register capture, then maps and passes a decoded API argument plus
+        one bad pointer to prove bad pointers do not crash extraction.
 
         Parameters:
         - module: Loaded module object passed by MalwareEmulator.run().
@@ -150,10 +182,12 @@ class FunctionDecodedEngine:
         self.mem_write(self.MEMORY_ADDRESS, self.memory_output[:split_at])
         self.mem_write(self.MEMORY_ADDRESS + split_at, self.memory_output[split_at:])
 
+        self._write_bytes(self.REGISTER_ADDRESS, self.register_output)
         self._registers["eax"] = self.REGISTER_ADDRESS
         for callback in self.code_hooks:
             callback(self, 0x401000, 5)
 
+        self._write_bytes(self.API_ADDRESS, self.api_output.encode("ascii") + b"\x00")
         lstrcpy = self.api_hooks.get(("kernel32", "lstrcpyA"))
         if lstrcpy is not None:
             lstrcpy(self, "lstrcpyA", None, [0x5000, self.API_ADDRESS])
@@ -295,6 +329,90 @@ class FunctionDecodedEngine:
             self._memory[address + offset] = byte
 
 
+class ExecuteAfterWriteEngine(FunctionDecodedEngine):
+    """
+    Purpose:
+    Simulate a self-decode window where plaintext exists only before overwrite.
+
+    How it works:
+    Reuses the fake decoded-output engine hook surface, but run_module() writes
+    plaintext into an executable buffer, fires code hooks inside that buffer,
+    then overwrites the buffer so final memory no longer contains plaintext.
+
+    Parameters:
+    - plaintext: Short plaintext bytes exposed only during execute-after-write.
+    - overwritten: Replacement bytes left in memory after the transient window.
+
+    Returns:
+    A fake engine instance for execute-after-write integration tests.
+    """
+
+    EXECUTE_ADDRESS: ClassVar[int] = 0x7000
+
+    def __init__(self, plaintext: bytes, overwritten: bytes) -> None:
+        """
+        Purpose:
+        Initialise transient plaintext and final overwrite bytes.
+
+        How it works:
+        Passes inert values to the base fake engine and stores the plaintext and
+        overwrite payloads used by run_module().
+
+        Parameters:
+        - plaintext: Bytes written before simulated execution.
+        - overwritten: Bytes written after simulated execution.
+
+        Returns:
+        void
+        """
+        super().__init__(memory_output=b"", api_output="", register_output=b"")
+        self.plaintext: bytes = plaintext
+        self.overwritten: bytes = overwritten
+
+    def run_module(self, module: object) -> None:
+        """
+        Purpose:
+        Simulate decode -> execute written region -> overwrite behavior.
+
+        How it works:
+        Records the module, writes plaintext into the execute buffer, invokes
+        registered code hooks with an address inside that buffer, then overwrites
+        the same bytes with non-plaintext data.
+
+        Parameters:
+        - module: Loaded module object passed by MalwareEmulator.run().
+
+        Returns:
+        void
+        """
+        self.run_calls.append(module)
+        self.mem_write(self.EXECUTE_ADDRESS, self.plaintext)
+        for callback in self.code_hooks:
+            callback(self, self.EXECUTE_ADDRESS + 2, 5)
+        self.mem_write(self.EXECUTE_ADDRESS, self.overwritten)
+
+    def final_memory_contains(self, needle: bytes) -> bool:
+        """
+        Purpose:
+        Report whether final fake memory still contains a byte sequence.
+
+        How it works:
+        Reads the final buffer range from the fake memory map and checks for the
+        requested bytes after run_module() has completed.
+
+        Parameters:
+        - needle: Byte sequence to search for in final memory.
+
+        Returns:
+        True when the final buffer contains needle, otherwise False.
+        """
+        data = bytes(
+            self._memory.get(self.EXECUTE_ADDRESS + offset, 0)
+            for offset in range(max(len(self.plaintext), len(self.overwritten)))
+        )
+        return needle in data
+
+
 def _build_emulator(engine: FunctionDecodedEngine) -> MalwareEmulator:
     """
     Purpose:
@@ -315,7 +433,7 @@ def _build_emulator(engine: FunctionDecodedEngine) -> MalwareEmulator:
     emulator.extractor = StringExtractor()
     emulator.tracker = WriteTracker()
     emulator.execution_status = None
-    emulator.se = engine
+    setattr(emulator, "se", engine)
     return emulator
 
 
@@ -362,12 +480,21 @@ def test_decoded_outputs_capture_memory_api_and_register_paths() -> None:
     )
     emulator = _build_emulator(engine)
 
+    plaintext_outputs = {
+        "memory-decoded.example/path",
+        "api-decoded.example",
+        "register-decoded.example",
+    }
+
+    assert not engine.has_mapped_runtime_plaintext()
     emulator.register_hooks()
+    assert plaintext_outputs.isdisjoint(_results_by_content(emulator))
     emulator.run()
 
     results = _results_by_content(emulator)
     module = cast(object, emulator.module)
     assert engine.run_calls == [module]
+    assert plaintext_outputs.issubset(results)
     assert results["memory-decoded.example/path"]["source"] == "deferred_scan"
     assert results["api-decoded.example"]["source"] == "api_hook"
     assert results["api-decoded.example"]["source_detail"] == "lstrcpyA"
@@ -416,3 +543,142 @@ def test_decoded_outputs_deduplicate_and_skip_bad_pointers_without_crashing() ->
     assert results[shared_output]["source_detail"] == "lstrcpyA"
     assert (FunctionDecodedEngine.BAD_POINTER, 1) in engine.read_mem_string_calls
     assert any(call[0] == FunctionDecodedEngine.BAD_POINTER for call in engine.mem_read_calls)
+
+
+@pytest.mark.integration
+def test_dotnet_replace_remove_style_plaintext_is_runtime_boundary_only() -> None:
+    """
+    Purpose:
+    Verify article-style .NET Replace/Remove obfuscation is covered as runtime output only.
+
+    How it works:
+    Builds a source-like string with inserted method-name junk plus homoglyph/special
+    characters, simulates runtime Remove/Replace producing plaintext, and exposes only
+    that plaintext through the fake lstrcpyA API boundary.
+
+    Parameters:
+    None.
+
+    Returns:
+    void
+    """
+    remove_junk = "String.Remove(3, 17)"
+    source_like = f"pay{remove_junk}l\u043eoad.ex\u00a7ample/path"
+    after_remove = source_like[:3] + source_like[3 + len(remove_junk) :]
+    runtime_plaintext = after_remove.replace("\u043e", "").replace("\u00a7", "")
+    assert runtime_plaintext == "payload.example/path"
+
+    engine = FunctionDecodedEngine(
+        memory_output=b"",
+        api_output=runtime_plaintext,
+        register_output=b"",
+    )
+    emulator = _build_emulator(engine)
+
+    emulator.register_hooks()
+    pre_run_results = _results_by_content(emulator)
+    assert source_like not in pre_run_results
+    assert after_remove not in pre_run_results
+    assert runtime_plaintext not in pre_run_results
+
+    emulator.run()
+
+    results = _results_by_content(emulator)
+    assert source_like not in results
+    assert after_remove not in results
+    assert runtime_plaintext in results
+    assert results[runtime_plaintext]["source"] == "api_hook"
+    assert results[runtime_plaintext]["source_detail"] == "lstrcpyA"
+
+
+@pytest.mark.integration
+def test_execute_after_write_capture_survives_plaintext_overwrite() -> None:
+    """
+    Purpose:
+    Verify plaintext is captured when execution enters a written buffer.
+
+    How it works:
+    Runs a fake engine that writes plaintext, fires code hooks inside that
+    region, overwrites the buffer, and asserts the final memory no longer holds
+    plaintext while extraction still reports execute_after_write provenance.
+
+    Parameters:
+    None.
+
+    Returns:
+    void
+    """
+    plaintext = b"execute-window.example/path\x00"
+    engine = ExecuteAfterWriteEngine(
+        plaintext=plaintext,
+        overwritten=b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x00",
+    )
+    emulator = _build_emulator(engine)
+
+    emulator.register_hooks()
+    emulator.run()
+
+    results = _results_by_content(emulator)
+    assert not engine.final_memory_contains(b"execute-window.example/path")
+    assert "execute-window.example/path" in results
+    assert results["execute-window.example/path"]["source"] == "execute_after_write"
+
+
+@pytest.mark.integration
+def test_execute_after_write_capture_is_bounded() -> None:
+    """
+    Purpose:
+    Verify execute-after-write snapshots do not grow with unbounded regions.
+
+    How it works:
+    Creates more transient execute buffers than the snapshot cap, runs the same
+    bounded code-hook path, and asserts retained snapshots and code-hook register
+    scan work stay capped.
+
+    Parameters:
+    None.
+
+    Returns:
+    void
+    """
+    engine = ExecuteAfterWriteEngine(
+        plaintext=b"execute-bounds.example\x00",
+        overwritten=b"yyyyyyyyyyyyyyyyyyyyyy\x00",
+    )
+
+    def run_many_regions(module: object) -> None:
+        """
+        Purpose:
+        Simulate many execute-after-write regions beyond the snapshot cap.
+
+        How it works:
+        Writes unique plaintext into disconnected buffers, fires code hooks in
+        each buffer, then overwrites the buffer so final memory cannot recover it.
+
+        Parameters:
+        - module: Loaded module object passed by MalwareEmulator.run().
+
+        Returns:
+        void
+        """
+        engine.run_calls.append(module)
+        for index in range(DEFAULT_MAX_CODE_HOOK_SCANS + 20):
+            address = engine.EXECUTE_ADDRESS + index * 0x100
+            payload = f"execute-bound-{index:02d}.example\x00".encode("ascii")
+            engine.mem_write(address, payload)
+            for callback in engine.code_hooks:
+                callback(engine, address, 5)
+            engine.mem_write(address, b"z" * len(payload))
+
+    engine.run_module = run_many_regions
+    emulator = _build_emulator(engine)
+
+    emulator.register_hooks()
+    emulator.run()
+
+    execute_snapshots = emulator.tracker.get_execute_after_write_candidates()
+    bad_pointer_reads = [
+        call for call in engine.mem_read_calls if call[0] == FunctionDecodedEngine.BAD_POINTER
+    ]
+    assert len(execute_snapshots) == MAX_EXECUTE_AFTER_WRITE_SNAPSHOTS
+    assert len(bad_pointer_reads) == DEFAULT_MAX_CODE_HOOK_SCANS + 1

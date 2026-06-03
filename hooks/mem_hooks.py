@@ -38,6 +38,8 @@ HOT_WRITE_THRESHOLD = 100
 SNAPSHOT_INTERVAL = 25
 MAX_SNAPSHOT_SIZE = 4096
 DEFAULT_MAX_DIRTY_REGIONS = 4096
+MAX_EXECUTE_AFTER_WRITE_SNAPSHOTS = 32
+MAX_EXECUTE_REGION_CHECKS = 128
 
 if speakeasy_errors is None:
     MemoryAccessError = Exception
@@ -60,6 +62,7 @@ class WriteTracker:
         self,
         max_candidate_history: int = 32,
         max_dirty_regions: int = DEFAULT_MAX_DIRTY_REGIONS,
+        max_execute_after_write_snapshots: int = MAX_EXECUTE_AFTER_WRITE_SNAPSHOTS,
     ) -> None:
         """
         Purpose:
@@ -67,12 +70,14 @@ class WriteTracker:
 
         How it works:
         Keeps dirty regions in the existing list format, evicts the oldest
-        disconnected regions past max_dirty_regions, and stores candidate
-        snapshots in a deque capped by max_candidate_history.
+        disconnected regions past max_dirty_regions, stores overwrite snapshots
+        in a bounded deque, and separately stores first-execute snapshots in a
+        bounded deque.
 
         Parameters:
         - max_candidate_history: maximum number of candidate snapshots to keep.
         - max_dirty_regions: maximum number of disconnected dirty regions to keep.
+        - max_execute_after_write_snapshots: maximum first-execute snapshots to keep.
 
         Returns:
         None.
@@ -80,6 +85,13 @@ class WriteTracker:
         self.regions: list[list[int]] = []
         self.max_dirty_regions: int = max_dirty_regions
         self._candidates: deque[tuple[int, bytes]] = deque(maxlen=max_candidate_history)
+        self.max_execute_after_write_snapshots: int = max(0, max_execute_after_write_snapshots)
+        self._execute_after_write_candidates: deque[tuple[int, bytes]] = deque(
+            maxlen=self.max_execute_after_write_snapshots,
+        )
+        self._execute_after_write_keys: deque[tuple[int, int]] = deque(
+            maxlen=self.max_execute_after_write_snapshots,
+        )
 
     def add_write(self, address: int, size: int) -> list[int]:
         """
@@ -156,6 +168,72 @@ class WriteTracker:
         A list of (address, data) tuples.
         """
         return list(self._candidates)
+
+    def capture_execute_after_write(
+        self,
+        reader: MemoryReader,
+        instruction_address: int,
+    ) -> tuple[int, bytes] | None:
+        """
+        Purpose:
+        Capture a bounded snapshot when execution enters a dirty written region.
+
+        How it works:
+        Checks only the most recent MAX_EXECUTE_REGION_CHECKS dirty regions,
+        skips regions already captured, stops after the configured snapshot cap,
+        and reads at most MAX_SNAPSHOT_SIZE bytes from the matching region.
+
+        Parameters:
+        - reader: emulator-like object exposing mem_read(address, size).
+        - instruction_address: current instruction address from a code hook.
+
+        Returns:
+        The stored (address, data) tuple, or None when no bounded snapshot is taken.
+        """
+        if self.max_execute_after_write_snapshots <= 0:
+            return None
+        if len(self._execute_after_write_candidates) >= self.max_execute_after_write_snapshots:
+            return None
+
+        recent_regions = self.regions[-MAX_EXECUTE_REGION_CHECKS:]
+        for start, end, _ in reversed(recent_regions):
+            if not start <= instruction_address < end:
+                continue
+            region_key = (start, end)
+            if region_key in self._execute_after_write_keys:
+                return None
+            read_size = min(end - start, MAX_SNAPSHOT_SIZE)
+            if read_size <= 0:
+                return None
+            try:
+                data = reader.mem_read(start, read_size)
+            except MemoryAccessError as err:
+                logger.debug(f"[Hook] Bỏ qua execute-after-write snapshot {hex(start)}: {err}")
+                return None
+            if not data:
+                return None
+            candidate = (start, bytes(data[:MAX_SNAPSHOT_SIZE]))
+            self._execute_after_write_candidates.append(candidate)
+            self._execute_after_write_keys.append(region_key)
+            return candidate
+        return None
+
+    def get_execute_after_write_candidates(self) -> list[tuple[int, bytes]]:
+        """
+        Purpose:
+        Return stored execute-after-write candidate snapshots.
+
+        How it works:
+        Converts the bounded internal deque to a list without modifying dirty
+        region or overwrite-history state.
+
+        Parameters:
+        None.
+
+        Returns:
+        A list of (address, data) tuples.
+        """
+        return list(self._execute_after_write_candidates)
 
     def get_regions(self) -> list[tuple[int, int]]:
         """

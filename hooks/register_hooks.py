@@ -21,6 +21,14 @@ class _CodeHookRegistrar(Protocol):
     def add_code_hook(self, callback: Callable[[object, int, int], None]) -> object: ...
 
 
+class _ExecuteAfterWriteTracker(Protocol):
+    def capture_execute_after_write(
+        self,
+        reader: _MemoryReader,
+        instruction_address: int,
+    ) -> tuple[int, bytes] | None: ...
+
+
 class _CandidateIngestor(Protocol):
     min_length: int
 
@@ -248,6 +256,7 @@ def setup_register_hooks(
     se: object,
     extractor: _CandidateIngestor,
     max_hook_scans: int = DEFAULT_MAX_CODE_HOOK_SCANS,
+    execute_after_write_tracker: _ExecuteAfterWriteTracker | None = None,
 ) -> None:
     """
     Purpose:
@@ -255,14 +264,16 @@ def setup_register_hooks(
 
     How it works:
     If the engine exposes add_code_hook(), installs a callback with a finite
-    per-run scan budget. Each allowed callback invokes scan_register_candidates()
-    with the callback emulator object, while later hot-loop callbacks return
-    immediately and post-run scanning remains available.
+    per-run scan budget. Each allowed callback first asks the optional dirty
+    tracker to snapshot execute-after-write windows, then invokes
+    scan_register_candidates() with the callback emulator object. Later hot-loop
+    callbacks return immediately and post-run scanning remains available.
 
     Parameters:
     - se: Speakeasy-like engine that may expose add_code_hook().
     - extractor: StringExtractor-like object receiving register-scan findings.
     - max_hook_scans: maximum code-hook callbacks that may trigger register scans.
+    - execute_after_write_tracker: optional dirty tracker for first-execute snapshots.
 
     Returns:
     void
@@ -280,25 +291,30 @@ def setup_register_hooks(
         Capture register-held string pointers during emulation.
 
         How it works:
-        Ignores instruction metadata, consumes one finite hook-scan budget slot,
-        then runs the existing bounded register scanner against the callback
-        emulator when provided, otherwise the registered engine.
+        Consumes one finite hook-scan budget slot, captures a bounded
+        execute-after-write snapshot when the current instruction enters a dirty
+        region, then runs the existing bounded register scanner against the
+        callback emulator when provided, otherwise the registered engine.
 
         Parameters:
         - emu: callback emulator object supplied by Speakeasy.
-        - address: current instruction address, unused.
+        - address: current instruction address.
         - size: current instruction size, unused.
 
         Returns:
         void
         """
         nonlocal hook_scans_remaining
-        _ = address
         _ = size
         if hook_scans_remaining <= 0:
             return
         hook_scans_remaining -= 1
         scan_engine = emu if emu is not None else se
+        if execute_after_write_tracker is not None:
+            _ = execute_after_write_tracker.capture_execute_after_write(
+                cast(_MemoryReader, scan_engine),
+                address,
+            )
         _ = scan_register_candidates(cast(_MemoryReader, scan_engine), extractor)
 
     try:

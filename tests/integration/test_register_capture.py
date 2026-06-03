@@ -204,7 +204,7 @@ def _build_emulator(engine: RegisterLifecycleEngine) -> MalwareEmulator:
     Configured MalwareEmulator instance.
     """
     emu = MalwareEmulator()
-    emu.se = engine
+    setattr(emu, "se", engine)
     emu.module = object()
     return emu
 
@@ -216,7 +216,8 @@ def test_register_capture_runs_automatically_after_emulation() -> None:
 
     How it works:
     Runs MalwareEmulator with a fake engine whose eax points to a string and
-    asserts the result is captured without CLI debug flags or manual scanning.
+    asserts the exact row keeps register_scan/eax provenance without relying on
+    CLI debug flags or manual scanning.
 
     Parameters:
     None.
@@ -232,11 +233,10 @@ def test_register_capture_runs_automatically_after_emulation() -> None:
     module = cast(object, emu.module)
     assert engine.run_calls == [module]
     results = cast(list[dict[str, object]], emu.get_extracted_strings())
-    assert any(
-        result["content"] == "register-final.example"
-        and result.get("source") == "register_scan"
-        for result in results
-    )
+    results_by_content = {cast(str, result["content"]): result for result in results}
+    register_row = results_by_content["register-final.example"]
+    assert register_row["source"] == "register_scan"
+    assert register_row["source_detail"] == "eax"
 
 
 def test_register_hooks_install_safe_code_hook_when_supported() -> None:
@@ -271,8 +271,8 @@ def test_register_hook_setup_falls_back_when_code_hooks_missing() -> None:
 
     How it works:
     Uses a fake engine where add_code_hook is not callable, then asserts
-    register_hooks() completes without raising and run() still scans registers
-    in its after-run finalization path.
+    register_hooks() completes without raising and run() still emits the exact
+    register_scan/eax row through its after-run finalization path.
 
     Parameters:
     None.
@@ -288,8 +288,7 @@ def test_register_hook_setup_falls_back_when_code_hooks_missing() -> None:
 
     assert len(engine.mem_write_hooks) == 1
     results = cast(list[dict[str, object]], emu.get_extracted_strings())
-    assert any(
-        result["content"] == "register-final.example"
-        and result.get("source") == "register_scan"
-        for result in results
-    )
+    results_by_content = {cast(str, result["content"]): result for result in results}
+    register_row = results_by_content["register-final.example"]
+    assert register_row["source"] == "register_scan"
+    assert register_row["source_detail"] == "eax"
