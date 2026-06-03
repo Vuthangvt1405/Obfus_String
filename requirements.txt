@@ -1,4 +1,2 @@
-speakeasy-emu @ git+https://github.com/mandiant/speakeasy.git
-pefile==2023.2.7
-capstone==5.0.1
-pytest==8.3.4
+speakeasy-emulator @ git+https://github.com/mandiant/speakeasy.git@3cb6c61eafcf7b372a8d49dae6c7ba87ccc64c60
+pytest==9.0.3
