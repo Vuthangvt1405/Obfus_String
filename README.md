@@ -1,14 +1,14 @@
 # Malware String Emulator
 
-`malstring_emu` là công cụ phân tích PE bằng Python dùng **Speakeasy v2** để quan sát và trích xuất chuỗi có giá trị trong quá trình giả lập. Mục tiêu của dự án là tăng khả năng bắt chuỗi theo hướng **best-effort, bounded**: lấy chuỗi tĩnh đọc được từ raw file, chuỗi runtime sinh ra trên stack/heap, chuỗi bị ghi đè nhanh, chuỗi nằm sau con trỏ trong register, và chuỗi truyền qua một số Windows API phổ biến.
+`malstring_emu` là công cụ phân tích PE bằng Python dùng **Speakeasy v2** để quan sát và trích xuất chuỗi có giá trị trong quá trình giả lập. Mục tiêu của dự án là tăng khả năng bắt chuỗi theo hướng **best-effort, bounded**: lấy chuỗi runtime sinh ra trên stack/heap, chuỗi bị ghi đè nhanh, chuỗi nằm sau con trỏ trong register, và chuỗi truyền qua một số Windows API phổ biến. Raw/static file bytes are not reported unless observed qua behavior runtime hoặc self-decode thật sự làm lộ plaintext.
 
 Công cụ này không cố khôi phục thuật toán decode. Kết quả phụ thuộc vào **behavior path** mà Speakeasy thật sự đi qua, hook có được cắm thành công hay không, và dữ liệu còn đọc được trong bộ nhớ tại thời điểm quan sát.
 
 ## Tính năng chính
 
-- **Default raw-file scan**: trước khi nạp mẫu vào Speakeasy, `core.static_scanner` đọc raw bytes của file với giới hạn kích thước và dùng cùng bộ lọc với runtime scan để bắt ASCII/UTF-8-compatible và UTF-16LE strings. Kết quả được gắn `source="static_scan"`.
 - **Runtime dirty-memory scan**: memory hook ghi nhận vùng bộ nhớ bị write, gộp vùng dirty, rồi cuối run đọc lại theo chunk có giới hạn để bắt chuỗi sinh ra trong lúc chạy. Kết quả thường đi qua `deferred_scan` hoặc `mem_write`.
 - **Pre-overwrite stack/heap capture**: `WriteTracker` giữ `overwrite_history` dạng bounded candidate snapshots để không mất chuỗi vừa được build trên stack hoặc heap rồi bị logic khác ghi đè.
+- **Execute-after-write short-window capture**: khi code hook thấy execution đi vào vùng memory vừa bị write, `WriteTracker` giữ snapshot ngắn có giới hạn và gắn `execute_after_write`. Đây là best-effort cho cửa sổ decode ngắn, không phải full unpacking.
 - **Tight-loop Safe-Stop**: `timeout` và `--max-instructions` dừng giả lập an toàn khi mẫu chạy vòng lặp dài. Sau khi dừng, công cụ vẫn drain Speakeasy report, register scan và dirty-region scan.
 - **Function-decoded output capture**: nếu function thật sự chạy và plaintext xuất hiện trong memory, API argument, Speakeasy report hoặc register pointer candidate, công cụ có thể bắt qua các output path đó. `hooks/register_hooks.py` cung cấp `register_scan` bounded để dereference register-held pointers.
 - **API argument hooks**: `hooks/api_hooks.py` bắt chuỗi ANSI/Wide từ một số Windows API như `lstrcpyA/W`, WinINet, WinHTTP, `CreateProcessA/W`, `CreateFileA/W`, `RegOpenKeyExA/W`.
@@ -74,23 +74,22 @@ CLI flags chính:
 | Path | Vai trò |
 |---|---|
 | `main.py` | CLI entrypoint: parse args, tạo `MalwareEmulator`, chạy phân tích và ghi report. |
-| `core/emulator.py` | Orchestrator của Speakeasy: load sample, register hooks, run, safe-stop, gom kết quả. |
+| `core/emulator.py` | Orchestrator của Speakeasy: load sample vào emulator, register hooks, run, safe-stop, gom kết quả. |
 | `core/extractor.py` | Bộ lọc và dedupe chuỗi: ASCII, UTF-16LE, tag URL/IP/domain/registry, source priority. |
-| `core/static_scanner.py` | Static byte scanner độc lập Speakeasy, dùng cho default raw-file scan. |
 | `hooks/mem_hooks.py` | Memory-write tracking, hot-region snapshot, bounded `overwrite_history`, dirty regions. |
 | `hooks/register_hooks.py` | Bounded register pointer scan và optional code hook registration. |
 | `hooks/api_hooks.py` | Windows API string argument capture cho ANSI/Wide arguments. |
 | `utils/reporter.py` | Ghi JSON report tương thích với consumer cũ. |
-| `tests/unit/` | Unit tests cho extractor, reporter, static scanner, register hooks, docs guardrails. |
-| `tests/integration/` | Integration tests cho runtime scan, static scan, register capture, tight-loop strategies. |
+| `tests/unit/` | Unit tests cho extractor, reporter, register hooks, docs guardrails. |
+| `tests/integration/` | Integration tests cho runtime scan, register capture, tight-loop strategies. |
 
 ## Luồng xử lý
 
 1. `main.py` đọc CLI arguments và tạo `MalwareEmulator` với `timeout`, `max_instructions`, `debug`.
-2. `MalwareEmulator.load_sample()` chạy `core.static_scanner.scan_file()` trước khi gọi `se.load_module()`.
+2. `MalwareEmulator.load_sample()` nạp mẫu thẳng vào Speakeasy qua `se.load_module()` rồi để runtime hooks và report quan sát chuỗi trong lúc emulation chạy.
 3. `register_hooks()` cắm memory hooks, API hooks và register hooks nếu engine hỗ trợ.
 4. `run()` gọi `se.run_module()` và phân loại trạng thái kết thúc: `completed`, `timeout`, `max_instructions`, `unsupported_api`, hoặc `error`.
-5. Dù run bị safe-stop, `finally` vẫn chạy final `register_scan`, drain Speakeasy JSON report, drain `overwrite_history`, rồi đọc lại dirty regions.
+5. Dù run bị safe-stop, `finally` vẫn chạy final `register_scan`, drain Speakeasy JSON report, drain `execute_after_write`/`overwrite_history`, rồi đọc lại dirty regions.
 6. `StringExtractor` lọc nhiễu, dedupe theo `content`, gắn source/provenance và tag regex.
 7. `ReportGenerator` ghi JSON output.
 
@@ -98,10 +97,12 @@ CLI flags chính:
 
 | Loại chuỗi | Có xử lý không? | Cách hoạt động | Giới hạn |
 |---|---|---|---|
-| Static string | Có, mặc định | `load_sample()` chạy `core.static_scanner` trên raw file trước khi nạp Speakeasy. Scan này bắt ASCII/UTF-8-compatible strings và quan sát UTF-16LE bằng cùng bộ lọc với runtime scan, gắn `source="static_scan"`. | Đây là raw-byte scan có giới hạn, không phải decoder reversal. Chuỗi bị mã hóa hoặc nén vẫn phụ thuộc runtime behavior path. |
+| Static string | Không báo cáo từ raw file | Raw/static file bytes are not reported như nguồn riêng. Chỉ khi runtime hoặc self-decode behavior làm lộ plaintext trong memory, register, API argument hoặc report thì chuỗi mới xuất hiện. | Raw/static bytes ở ngoài phạm vi trực tiếp, nên chuỗi mã hóa hoặc nén vẫn phụ thuộc behavior path. |
 | Stack string | Có, theo runtime | Khi malware build chuỗi trên stack hoặc heap, memory hook ghi nhận vùng bị write. `overwrite_history` giữ bounded pre-overwrite candidates khi buffer bị ghi đè, dirty-region scan đọc lại vùng bẩn cuối run, và API hook bắt nếu chuỗi được truyền vào Windows API. | Best-effort và bounded: phụ thuộc branch đã chạy, vùng nhớ còn đọc được, giới hạn history/snapshot, và thời điểm chuỗi bị ghi đè. |
 | Tight string / tight-loop decrypted string | Có, best-effort | `timeout` và `--max-instructions` chặn vòng lặp dài bằng Safe-Stop. `WriteTracker` đếm vùng ghi lặp; khi vùng đủ hot, hook đọc snapshot có giới hạn và scan ngay, rồi cuối run scan lại các dirty regions. | Không vượt qua mọi vòng lặp giải mã và không hứa hẹn giải mọi thuật toán. Snapshot bị giới hạn kích thước để tránh treo emulator. |
+| Execute-after-write self-decode window | Có, best-effort | Nếu malware ghi plaintext vào memory, execution đi vào vùng vừa ghi, rồi ghi đè lại vùng đó, code hook có thể giữ snapshot ngắn trước khi plaintext biến mất. | Không phải full unpacker: chỉ bắt path đã chạy, snapshot bytes/số snapshot/số code-hook scan đều bị giới hạn, và không dump decoded PE hoàn chỉnh. |
 | Function-decoded string | Có nếu function thật sự chạy | Không có detector riêng cho hàm decode. Nếu hàm decode được emulation đi qua và output plaintext ra memory, Speakeasy report, dirty/deferred scan, API hook, hoặc bounded `register_scan` có thể bắt plaintext còn nằm trong register/pointer ứng viên. | Nếu function không được gọi, bị anti-emulation chặn, register không đọc được, hoặc plaintext bị xóa quá nhanh, report có thể thiếu chuỗi đó. Không bảo đảm khôi phục decoder. |
+| Runtime string-method deobfuscation observed at output boundary | Có nếu plaintext runtime lộ ra | Với pattern kiểu .NET `String.Replace`/`String.Remove` tạo plaintext từ chuỗi có homoglyph, ký tự đặc biệt hoặc method-name junk, công cụ chỉ bắt kết quả cuối khi behavior path thật sự đưa plaintext ra memory, API argument, report hoặc register pointer. | This is not static .NET deobfuscation: không parse CIL, không strip homoglyph từ raw bytes, không mô phỏng `Replace`/`Remove` trên chuỗi tĩnh, và không bảo đảm mọi obfuscation kiểu này đều bị bắt. |
 
 ## Source labels trong output
 
@@ -109,10 +110,10 @@ Các kết quả có thể có `source` để analyst biết chuỗi đến từ
 
 | Source | Ý nghĩa |
 |---|---|
-| `static_scan` | Chuỗi đọc được từ raw file trước emulation. |
 | `deferred_scan` | Chuỗi đọc lại từ dirty memory region sau khi run dừng. |
 | `overwrite_history` | Chuỗi được giữ lại từ bounded pre-overwrite candidate history. |
 | `mem_write` | Chuỗi bắt trực tiếp từ memory-write path. |
+| `execute_after_write` | Chuỗi từ snapshot ngắn khi execution đi vào vùng memory vừa bị write. |
 | `register_scan` | Chuỗi tìm thấy khi dereference register-held pointer candidate. |
 | `api_hook` | Chuỗi bắt từ tham số Windows API hook. |
 
@@ -143,11 +144,11 @@ Consumer cũ chỉ cần đọc `timestamp`, `total_strings`, `strings`. Các me
 
 ## Giới hạn cần nhớ
 
-- Kết quả là **not static** theo nghĩa không chứng minh toàn bộ binary đã được hiểu hết. Static path chỉ là raw-byte observation.
+- Kết quả là **not static** theo nghĩa không chứng minh toàn bộ binary đã được hiểu hết. Raw/static bytes chỉ xuất hiện nếu behavior path làm lộ chúng trong quan sát runtime.
 - Không có bảo đảm rằng mọi branch, mọi API path hoặc mọi decoder function sẽ được Speakeasy chạy qua.
 - Không bảo đảm khôi phục decoder hoặc suy luận thuật toán giải mã.
-- Packed/encrypted data chỉ xuất hiện nếu behavior path làm lộ plaintext trong file bytes đọc được, memory, register, API argument hoặc report.
-- Các giới hạn bounded cố ý được đặt để tránh OOM/hang: static scan giới hạn byte đọc, dirty-region scan giới hạn chunk, register scan giới hạn số lần đọc và kích thước đọc, overwrite history giới hạn số candidate.
+- Packed/encrypted data chỉ xuất hiện nếu behavior path làm lộ plaintext trong memory, register, API argument hoặc report.
+- Các giới hạn bounded cố ý được đặt để tránh OOM/hang: dirty-region scan giới hạn chunk, register scan giới hạn số lần đọc và kích thước đọc, overwrite history và execute-after-write đều giới hạn số candidate/snapshot.
 
 ## Kiểm thử
 
@@ -170,7 +171,6 @@ pytest -m tight_loop
 Một số lệnh hữu ích khi sửa logic bắt chuỗi:
 
 ```bash
-pytest tests/unit/test_static_scanner.py -q
 pytest tests/unit/test_register_hooks.py -q
 pytest tests/unit/test_docs.py -q
 pytest tests/integration/test_runtime_e2e.py -q

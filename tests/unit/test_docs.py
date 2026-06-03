@@ -57,18 +57,28 @@ def test_readme_rejects_guaranteed_decoder_recovery_and_loop_bypass() -> None:
         assert forbidden_claim not in readme_text
 
 
-# Purpose: Verify README documents default static scan coverage.
-# How it works: Reads README.md and checks required static scanner terms.
+# Purpose: Verify README rejects removed static/raw scan coverage claims.
+# How it works: Reads README.md, rejects old static scanner wording, and checks runtime-only caveats.
 # Parameters: None.
 # Returns: None.
-def test_readme_documents_default_static_scan() -> None:
+def test_readme_rejects_default_static_or_raw_scan_claims() -> None:
     readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8").lower()
 
-    assert "core.static_scanner" in readme_text
-    assert "default raw-file scan" in readme_text
-    assert "ascii/utf-8-compatible" in readme_text
-    assert "utf-16le" in readme_text
-    assert "static_scan" in readme_text
+    forbidden_static_terms = (
+        "core.static" + "_scanner",
+        "default raw-file scan",
+        "static" + "_scan",
+    )
+
+    for forbidden_term in forbidden_static_terms:
+        assert forbidden_term not in readme_text
+
+    assert "raw/static bytes" in readme_text
+    assert "not reported" in readme_text
+    assert "unless observed" in readme_text
+    assert "emulation" in readme_text
+    assert "runtime" in readme_text
+    assert "self-decode" in readme_text
 
 
 # Purpose: Verify README documents pre-overwrite stack and heap capture.
@@ -99,6 +109,21 @@ def test_readme_documents_bounded_register_tracking() -> None:
     assert "plaintext" in readme_text
 
 
+# Purpose: Verify README scopes .NET string-method obfuscation to runtime boundaries.
+# How it works: Reads README.md and checks the article-style case plus static caveats.
+# Parameters: None.
+# Returns: None.
+def test_readme_scopes_dotnet_replace_remove_to_runtime_boundaries() -> None:
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8").lower()
+
+    assert "runtime string-method deobfuscation observed at output boundary" in readme_text
+    assert "string.replace" in readme_text
+    assert "string.remove" in readme_text
+    assert "not static .net deobfuscation" in readme_text
+    assert "không parse cil" in readme_text
+    assert "không strip homoglyph" in readme_text
+
+
 # Purpose: Verify README documents source provenance and bounded limitations.
 # How it works: Reads README.md and checks full source labels plus caveat terms.
 # Parameters: None.
@@ -107,9 +132,9 @@ def test_readme_documents_source_flow_and_limitations() -> None:
     readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8").lower()
 
     required_sources = (
-        "static_scan",
         "deferred_scan",
         "overwrite_history",
+        "execute_after_write",
         "mem_write",
         "register_scan",
         "api_hook",
