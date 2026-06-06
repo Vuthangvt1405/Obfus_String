@@ -13,6 +13,7 @@ Công cụ này không cố khôi phục thuật toán decode. Kết quả phụ
 - **Function-decoded output capture**: nếu function thật sự chạy và plaintext xuất hiện trong memory, API argument, Speakeasy report hoặc register pointer candidate, công cụ có thể bắt qua các output path đó. `hooks/register_hooks.py` cung cấp `register_scan` bounded để dereference register-held pointers.
 - **API argument hooks**: `hooks/api_hooks.py` bắt chuỗi ANSI/Wide từ một số Windows API như `lstrcpyA/W`, WinINet, WinHTTP, `CreateProcessA/W`, `CreateFileA/W`, `RegOpenKeyExA/W`.
 - **Behavior tracing best-effort**: gom API call quan sát được và chuỗi/IOC runtime để suy luận hành vi như network, file, registry persistence, process execution, possible injection và anti-analysis. Đây là tóm tắt theo path đã emulation, không phải kết luận tuyệt đối.
+- **GUI local web workbench**: `gui.py` mở giao diện web cục bộ để chọn sample, chạy emulation, xem live logs, lọc strings, xem behavior summary/IOC và export CSV mà không cần thêm dependency ngoài stdlib.
 - **JSON output tương thích ngược**: report vẫn giữ `timestamp`, `total_strings`, `strings`; các field provenance như `source`, `source_detail`, `execution_constraints`, `behavior` là optional.
 
 ## Cài đặt
@@ -37,6 +38,8 @@ pip install -r requirements.txt
 
 ## Cách sử dụng
 
+### CLI
+
 Chạy CLI chính qua `main.py`:
 
 ```bash
@@ -57,7 +60,12 @@ python main.py -f tight_loop_sample.exe -t 30 --max-instructions 1000000 -o tigh
 
 # Chạy với kiến trúc x86 hoặc x64
 python main.py -f payload.dll -a x64 -o payload_strings.json
+
+# Lọc noise và chỉ xuất kết quả confidence cao
+python main.py -f sample.exe --clean-output --min-confidence 70 -o report.json
 ```
+
+Một số lab sample có thể kiểm tra biến môi trường safety gate. Tool xử lý gate này bên trong emulator hook khi thấy `getenv("LAB_MALWARE_ALLOWED")`, nên không cần truyền host env var để chạy sample test.
 
 CLI flags chính:
 
@@ -68,13 +76,47 @@ CLI flags chính:
 | `-t`, `--timeout` | Thời gian giả lập tối đa, tính bằng giây. |
 | `--max-instructions` | Số lệnh tối đa trước khi Safe-Stop. |
 | `-o`, `--output` | File JSON output; mặc định `report.json`. |
+| `--clean-output` | Ẩn một số chuỗi `deferred_scan` nhiễu khi đã có evidence tự tin hơn. |
+| `--min-confidence` | Chỉ xuất chuỗi có confidence lớn hơn hoặc bằng ngưỡng này. |
 | `-d`, `--debug` | Bật log debug. |
+
+### GUI local web
+
+Chạy GUI bằng Python trong cùng virtualenv:
+
+```bash
+python gui.py
+```
+
+Mặc định GUI chạy tại:
+
+```text
+http://127.0.0.1:8765/
+```
+
+Tùy chọn:
+
+```bash
+# Không tự mở browser
+python gui.py --no-browser
+
+# Chọn port khác
+python gui.py --port 9000
+```
+
+GUI hỗ trợ:
+
+- Form cấu hình sample, output, arch, timeout, max instructions, clean output, min confidence.
+- Live logs từ subprocess `main.py`.
+- Bảng strings có search, source filter và export CSV.
+- Behavior tab gồm verdict, risk score, summary, IOC buckets và event timeline.
 
 ## Cấu trúc dự án
 
 | Path | Vai trò |
 |---|---|
 | `main.py` | CLI entrypoint: parse args, tạo `MalwareEmulator`, chạy phân tích và ghi report. |
+| `gui.py` | Local web GUI dùng Python stdlib, chạy `main.py` qua subprocess và render report JSON. |
 | `core/emulator.py` | Orchestrator của Speakeasy: load sample vào emulator, register hooks, run, safe-stop, gom kết quả. |
 | `core/extractor.py` | Bộ lọc và dedupe chuỗi: ASCII, UTF-16LE, tag URL/IP/domain/registry, source priority. |
 | `core/behavior.py` | Behavior tracer/classifier: network, file, registry, process, injection, evasion, IOC buckets và risk summary. |
@@ -106,6 +148,24 @@ CLI flags chính:
 | Execute-after-write self-decode window | Có, best-effort | Nếu malware ghi plaintext vào memory, execution đi vào vùng vừa ghi, rồi ghi đè lại vùng đó, code hook có thể giữ snapshot ngắn trước khi plaintext biến mất. | Không phải full unpacker: chỉ bắt path đã chạy, snapshot bytes/số snapshot/số code-hook scan đều bị giới hạn, và không dump decoded PE hoàn chỉnh. |
 | Function-decoded string | Có nếu function thật sự chạy | Không có detector riêng cho hàm decode. Nếu hàm decode được emulation đi qua và output plaintext ra memory, Speakeasy report, dirty/deferred scan, API hook, hoặc bounded `register_scan` có thể bắt plaintext còn nằm trong register/pointer ứng viên. | Nếu function không được gọi, bị anti-emulation chặn, register không đọc được, hoặc plaintext bị xóa quá nhanh, report có thể thiếu chuỗi đó. Không bảo đảm khôi phục decoder. |
 | Runtime string-method deobfuscation observed at output boundary | Có nếu plaintext runtime lộ ra | Với pattern kiểu .NET `String.Replace`/`String.Remove` tạo plaintext từ chuỗi có homoglyph, ký tự đặc biệt hoặc method-name junk, công cụ chỉ bắt kết quả cuối khi behavior path thật sự đưa plaintext ra memory, API argument, report hoặc register pointer. | This is not static .NET deobfuscation: không parse CIL, không strip homoglyph từ raw bytes, không mô phỏng `Replace`/`Remove` trên chuỗi tĩnh, và không bảo đảm mọi obfuscation kiểu này đều bị bắt. |
+
+## Behavior tracing
+
+Behavior report là lớp suy luận best-effort từ API calls đã quan sát và IOC strings đã extract. Nó không thay thế sandbox đầy đủ và không khẳng định toàn bộ capability của mẫu.
+
+Các category chính:
+
+| Category | Ý nghĩa |
+|---|---|
+| `network.*` | HTTP/WinINet/WinHTTP/socket/DNS hoặc network indicators. |
+| `file.*` | Mở, tạo, ghi, copy, move hoặc xóa file, hoặc file path indicators. |
+| `registry.*` | Đọc/ghi registry thông thường. |
+| `persistence.*` | Registry Run/RunOnce/service/startup indicators có khả năng persistence. |
+| `process.*` | Spawn process, enumerate/open process hoặc process/script indicators. |
+| `injection.*` | API chain hoặc API đơn lẻ thường gặp trong remote injection. |
+| `evasion.*` | Debugger/timing/tool-detection indicators. |
+
+Report gồm `verdict`, `risk_score`, `summary`, `tactics`, `iocs`, `events` và `execution_note`. Với string-only evidence, confidence thấp hơn API-observed behavior.
 
 ## Source labels trong output
 
@@ -197,12 +257,19 @@ pytest -m speakeasy
 pytest -m tight_loop
 ```
 
-Một số lệnh hữu ích khi sửa logic bắt chuỗi:
+Một số lệnh hữu ích khi sửa logic bắt chuỗi hoặc behavior:
 
 ```bash
 pytest tests/unit/test_register_hooks.py -q
+pytest tests/unit/test_behavior.py -q
 pytest tests/unit/test_docs.py -q
 pytest tests/integration/test_runtime_e2e.py -q
+```
+
+Validate sample expected strings:
+
+```bash
+python tools/validate_expected.py -r report.json -e "sample/Hidden Strings.txt"
 ```
 
 Docs guardrails nằm trong `tests/unit/test_docs.py`; chúng giúp README không vô tình hứa hẹn quá mức về extraction, decoder recovery hoặc loop handling.
