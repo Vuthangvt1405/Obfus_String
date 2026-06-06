@@ -29,6 +29,8 @@ def parse_args(argv=None):
     parser.add_argument("-t", "--timeout", type=int, default=60, help="Thời gian giả lập tối đa (giây).")
     parser.add_argument("--max-instructions", type=int, help="Số lệnh tối đa trước khi dừng giả lập (ghi đè timeout nếu đạt trước).")
     parser.add_argument("-o", "--output", default="report.json", help="File xuất báo cáo JSON chứa các chuỗi đã giải mã.")
+    parser.add_argument("--clean-output", action="store_true", help="Ẩn các chuỗi deferred_scan nhiễu khi đã có evidence tự tin hơn.")
+    parser.add_argument("--min-confidence", type=int, help="Chỉ xuất chuỗi có confidence >= giá trị này.")
     parser.add_argument("-d", "--debug", action="store_true", help="Bật chế độ Debug để xem chi tiết PE load")
     return parser.parse_args(argv)
 
@@ -82,7 +84,10 @@ def main():
         logger.info("[+] Giả lập hoàn tất hoặc đã đạt giới hạn an toàn.")
 
         # 5. Xuất báo cáo
-        extracted_strings = emu.get_extracted_strings()
+        extracted_strings = emu.get_extracted_strings(
+            clean=args.clean_output,
+            min_confidence=args.min_confidence,
+        )
         if extracted_strings:
             reporter = ReportGenerator(args.output)
             metadata = {"stop_reason": emu.execution_status} if emu.execution_status else None

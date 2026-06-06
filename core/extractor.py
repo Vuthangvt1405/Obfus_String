@@ -66,8 +66,9 @@ class StringExtractor:
           Stored verbatim in the result entry for reporters.
         """
         if str_val and len(str_val) >= self.min_length:
+             detail = source_detail if source_detail is not None else api_name
              self._add_result(f"API_{api_name}", str_val, "API_ARG",
-                              source='api_hook', source_detail=source_detail)
+                              source='api_hook', source_detail=detail)
 
     def ingest_candidate(self, content, source, location=None, source_detail=None):
         """
@@ -237,6 +238,21 @@ class StringExtractor:
         "api_hook": 60,
     }
 
+    _SOURCE_CONFIDENCE = {
+        "deferred_scan": 40,
+        "overwrite_history": 65,
+        "mem_write": 60,
+        "execute_after_write": 75,
+        "register_scan": 80,
+        "api_hook": 95,
+    }
+
+    def _confidence_for_source(self, source, source_detail=None):
+        """Return a coarse analyst-confidence score for a capture source."""
+        if source == 'api_hook' and source_detail == 'speakeasy_report':
+            return 70
+        return self._SOURCE_CONFIDENCE.get(source, 50)
+
     def _is_noise(self, content):
         """
         Purpose:
@@ -300,14 +316,19 @@ class StringExtractor:
                 )
                 if new_priority > current_priority and source is not None:
                     res['source'] = source
+                    res['confidence'] = self._confidence_for_source(source, source_detail)
                     if source_detail is not None:
                         res['source_detail'] = source_detail
+                    if source == 'api_hook' and source_detail is not None:
+                        res['api'] = source_detail
                 elif (
                     new_priority == current_priority
                     and source_detail is not None
                     and 'source_detail' not in res
                 ):
                     res['source_detail'] = source_detail
+                    if source == 'api_hook':
+                        res['api'] = source_detail
                 return
 
         # Respect result cap — only check when we would append a new entry
@@ -333,10 +354,52 @@ class StringExtractor:
         }
         if source is not None:
             entry["source"] = source
+            entry["confidence"] = self._confidence_for_source(source, source_detail)
         if source_detail is not None:
             entry["source_detail"] = source_detail
+        if source == 'api_hook' and source_detail is not None:
+            entry["api"] = source_detail
         self.results.append(entry)
         logger.debug(f"[Extractor] Đã bắt được chuỗi: '{content}' (Tại: {location})")
 
-    def get_results(self):
-        return self.results
+    @staticmethod
+    def _norm_for_cleaning(content):
+        return (
+            content.replace('\\r', '\r')
+                   .replace('\\n', '\n')
+                   .replace('\\t', '\t')
+        )
+
+    def get_results(self, clean=False, min_confidence=None):
+        """
+        Return extracted strings.
+
+        clean=True suppresses low-confidence deferred-scan fragments when a
+        higher-confidence version of the same/similar string exists. This keeps
+        noisy dirty-memory overlaps available by default, but lets CLI users
+        request a triage-friendly report.
+        """
+        results = list(self.results)
+        if min_confidence is not None:
+            results = [r for r in results if r.get('confidence', 50) >= min_confidence]
+        if not clean:
+            return results
+
+        strong = [
+            self._norm_for_cleaning(r.get('content', ''))
+            for r in results
+            if r.get('confidence', 0) >= 80
+        ]
+        cleaned = []
+        for r in results:
+            content = self._norm_for_cleaning(r.get('content', ''))
+            if r.get('confidence', 0) < 80:
+                if any(content == s or content in s or s in content for s in strong):
+                    continue
+            if r.get('source') == 'deferred_scan':
+                if any(content == s or content in s or s in content for s in strong):
+                    continue
+                if r.get('confidence', 0) < 50:
+                    continue
+            cleaned.append(r)
+        return cleaned

@@ -27,12 +27,25 @@ class FakeEmu:
 
     def __init__(self, mem_table=None):
         self._mem = mem_table or {}
+        self._allocations = {}
+        self._written = {}
 
     def read_mem_string(self, ptr, width=1):
         key = (ptr, width)
         if key in self._mem:
             return self._mem[key]
         raise Exception(f"unmapped address {hex(ptr)} width={width}")
+        
+    def mem_alloc(self, size, base=None):
+        addr = 0x69000000
+        self._allocations[addr] = size
+        return addr
+        
+    def mem_write(self, addr, data):
+        self._written[addr] = data
+        
+    def get_ptr_size(self):
+        return 4
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +128,7 @@ class TestSetupApiHooks:
         ext = StringExtractor()
         setup_api_hooks(se, ext)
         # All hooks attempted despite one failure
-        total_expected = 3 + len(_STRING_API_HOOKS)
+        total_expected = 25 + len(_STRING_API_HOOKS)
         assert se.add_api_hook.call_count == total_expected
 
 
@@ -615,3 +628,83 @@ class TestCreateFileHook:
             mem_table={},
         )
         assert ext.get_results() == []
+
+# ---------------------------------------------------------------------------
+# __iob_func hook coverage 
+# ---------------------------------------------------------------------------
+
+class TestIobFuncHook:
+    def _install_and_fire(self, argv, emu):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == "__iob_func":
+                cb = c.args[0]
+                return cb(emu, "__iob_func", None, argv), ext
+        return None, ext
+
+    def test_allocates_and_returns_stable_pointer(self):
+        emu = FakeEmu()
+        ptr1, ext1 = self._install_and_fire([], emu)
+        ptr2, ext2 = self._install_and_fire([], emu)
+        
+        assert ptr1 != 0
+        assert ptr1 == ptr2
+        assert len(ext1.get_results()) == 0
+
+# ---------------------------------------------------------------------------
+# getenv hook coverage
+# ---------------------------------------------------------------------------
+
+class TestGetEnvHook:
+    def _install_and_fire(self, argv, emu):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == "getenv":
+                cb = c.args[0]
+                return cb(emu, "getenv", lambda args: 42, argv), ext
+        return None, ext
+
+    def test_returns_lab_malware_pointer(self, monkeypatch):
+        import os
+        monkeypatch.setenv('LAB_MALWARE_ALLOWED', '1')
+        emu = FakeEmu({(0x8000, 1): "LAB_MALWARE_ALLOWED"})
+        ptr, ext = self._install_and_fire([0x8000], emu)
+        assert ptr != 0 and ptr != 42
+        assert len(ext.get_results()) == 0
+
+    def test_default_returns_func_result(self, monkeypatch):
+        emu = FakeEmu({(0x8000, 1): "SOME_OTHER_VAR"})
+        ptr, ext = self._install_and_fire([0x8000], emu)
+        assert ptr == 42
+
+# ---------------------------------------------------------------------------
+# WinHttpSendRequest hook coverage
+# ---------------------------------------------------------------------------
+
+class TestWinHttpSendRequestHook:
+    def _install_and_fire(self, argv, emu):
+        se = MagicMock()
+        ext = StringExtractor()
+        setup_api_hooks(se, ext)
+        for c in se.add_api_hook.call_args_list:
+            if c.args[2] == "WinHttpSendRequest":
+                cb = c.args[0]
+                cb(emu, "WinHttpSendRequest", lambda args: 1, argv)
+                break
+        return ext
+
+    def test_captures_headers_and_body(self):
+        emu = FakeEmu({
+            (0x1000, 2): "Content-Type: text/plain",
+            (0x2000, 1): "malicious_data_here"
+        })
+        ext = self._install_and_fire([1, 0x1000, 24, 0x2000, 14, 0, 0], emu)
+        res = [r['content'] for r in ext.get_results()]
+        assert "Content-Type: text/plain" in res
+        assert "malicious_data" in res
+

@@ -1,0 +1,86 @@
+1. Persistence (tồn tại)
+"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+
+"MalwareService"
+
+"MicrosoftEdgeUpdateTask"
+
+"schtasks /create /tn \"%s\" /tr \"%s\" /sc daily /st 09:00 /f"
+
+"C:\\Users\\Public\\"
+
+"notepad.exe", "explorer.exe"
+
+2. Mutex & biến môi trường
+"Global\\MalwareFrameworkInstance"
+
+"LAB_MALWARE_ALLOWED"
+
+3. C2 & network
+"MalwareAgent/1.0"
+
+"/beacon", "/command", "/screenshot", "/keylog", "/result"
+
+"seed-%d-%d", "mal%08x.com"
+
+"id=TEST&status=alive"
+
+"Content-Type: application/x-www-form-urlencoded\r\n"
+
+"data=", "logs=", "result="
+
+4. Thông báo debug (chính)
+"[BEACON] Sending beacon to %s\n"
+
+"[EVASION] Debugger/VM detected. Exiting.\n"
+
+"[SAFETY] Set LAB_MALWARE_ALLOWED=1 to run in lab environment.\n"
+
+"[MAIN] Another instance already running. Exiting.\n"
+
+"[WORM] Scanning local subnet for SMB targets...\n"
+
+"[WORM] Found live SMB host: %s\n"
+
+"[EXPLOIT] Attempting SMB exploit against %s (stub)\n"
+
+"[TROJAN] Dropped copy as %s\n"
+
+"[POLYMORPH] Generating new signature...\n"
+
+"[FILELESS] Injecting into explorer.exe...\n"
+
+"[PERSISTENCE] Added to HKCU Run\n"
+
+"[PERSISTENCE] Scheduled task created via schtasks\n"
+
+"[PERSISTENCE] Copied to Startup folder: %s\n"
+
+"[PERSISTENCE] WMI event subscription stub...\n"
+
+"[HOLLOW] Starting process hollowing into notepad.exe\n"
+
+"[HOLLOW] Failed to create suspended process\n"
+
+"[HOLLOW] VirtualAllocEx failed\n"
+
+"[HOLLOW] Process hollowing completed\n"
+
+"[RANSOMWARE] Searching for files to encrypt (stub)...\n"
+
+"[COVERT] DNS exfiltration stub...\n"
+
+"[SCREEN] Screenshot captured and encoded\n"
+
+"[KEYLOGGER] Active\n"
+
+"[C2] Processing command: %s\n"
+
+"[C2] Uninstall command received. Exiting.\n"
+
+"Failed to run command"
+
+5. Các chuỗi lẻ khác
+"exec " (dùng để phân tích lệnh)
+
+"screenshot", "keylog_dump", "persistence", "uninstall" (tên lệnh C2)

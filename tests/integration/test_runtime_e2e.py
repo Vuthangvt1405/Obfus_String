@@ -9,9 +9,6 @@ import pytest
 # Thư mục gốc chứa mã nguồn dự án
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Đường dẫn đến file test.c đã được biên dịch giả định (nếu có)
-TEST_SAMPLE = PROJECT_ROOT / "test.c"  # Mặc dù file .c không thể chạy trực tiếp, Speakeasy hỗ trợ xử lý PE, có thể cần build
-
 
 @pytest.fixture
 def run_cli():
@@ -23,25 +20,22 @@ def run_cli():
         return result
     return _run
 
+
 @pytest.mark.integration
 @pytest.mark.speakeasy
-def test_runtime_capture_e2e(run_cli, tmp_path):
+@pytest.mark.requires_fixture("xor_self_decrypt_fixture.exe")
+def test_runtime_capture_e2e(run_cli, tmp_path, fixture_path):
     """
     Test E2E toàn bộ luồng chạy của chương trình thông qua main.py.
-    Yêu cầu file test hợp lệ (pe_fixture.exe) để giả lập.
-    Nếu không tìm thấy mẫu, skip test này (theo yêu cầu không thất bại tùy tiện).
+    Sử dụng benign fixture tự giải mã XOR (thecyberyeti.com).
+    Tự động skip nếu fixture hoặc Speakeasy không có sẵn.
     """
-    # Hiện tại chưa có file PE thật trong repo (.c chưa build).
-    # Chúng ta sử dụng một file giả nếu có thể, hoặc bỏ qua nếu không tồn tại file test hợp lệ.
-    pe_file = PROJECT_ROOT / "test_fixture.exe"
+    pe_file = fixture_path  # Resolved by conftest.py requires_fixture marker
     
-    if not pe_file.exists():
-        pytest.skip(f"Mẫu phân tích {pe_file} không tồn tại. Yêu cầu build test.c thành exe để test e2e.")
-        
     output_json = tmp_path / "test_report.json"
     
     # 1. Chạy CLI
-    result = run_cli("-f", str(pe_file), "-a", "x86", "-t", "5", "-o", str(output_json))
+    result = run_cli("-f", str(pe_file), "-a", "x86", "-t", "60", "-o", str(output_json))
     
     cli_log = tmp_path / "task-12-cli-run.txt"
     cli_log.write_text(

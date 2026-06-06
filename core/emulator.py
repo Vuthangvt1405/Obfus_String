@@ -2,6 +2,7 @@
 # pyright: reportMissingImports=false
 import logging
 import json
+import os
 import speakeasy
 from speakeasy.errors import SpeakeasyError, NotSupportedError
 from hooks.mem_hooks import WriteTracker, setup_memory_hooks
@@ -51,6 +52,11 @@ class MalwareEmulator:
         config_dict = speakeasy.config.get_default_config_dict()
         config_dict['timeout'] = self.timeout
         config_dict['max_instructions'] = self.max_instructions
+
+        config_dict.setdefault('env', {})
+        _lab_val = os.environ.get('LAB_MALWARE_ALLOWED')
+        if _lab_val is not None:
+            config_dict['env']['LAB_MALWARE_ALLOWED'] = _lab_val
 
         try:
             self.se = speakeasy.Speakeasy(config=config_dict)
@@ -371,5 +377,8 @@ class MalwareEmulator:
         except Exception as e:
             logger.debug(f"[Emulator] Không thể trích xuất từ report: {e}")
 
-    def get_extracted_strings(self):
-        return self.extractor.get_results()
+    def get_extracted_strings(self, clean=False, min_confidence=None):
+        return self.extractor.get_results(
+            clean=clean,
+            min_confidence=min_confidence,
+        )
