@@ -88,13 +88,24 @@ def main():
             clean=args.clean_output,
             min_confidence=args.min_confidence,
         )
-        if extracted_strings:
+        behavior_report = emu.get_behavior_report(strings=extracted_strings)
+        has_behavior_events = bool(behavior_report.get("events"))
+        if has_behavior_events:
+            logger.info(f"[*] Behavior verdict: {behavior_report.get('verdict')} | risk={behavior_report.get('risk_score')}")
+            for item in behavior_report.get("summary", [])[:5]:
+                logger.info(f"    - {item}")
+        if extracted_strings or has_behavior_events:
             reporter = ReportGenerator(args.output)
             metadata = {"stop_reason": emu.execution_status} if emu.execution_status else None
-            reporter.save(extracted_strings, metadata=metadata)
-            logger.info(f"[+] Báo cáo {len(extracted_strings)} chuỗi đã được lưu tại: {args.output}")
+            reporter.save(
+                extracted_strings,
+                metadata=metadata,
+                behavior=behavior_report,
+                allow_empty=has_behavior_events,
+            )
+            logger.info(f"[+] Báo cáo {len(extracted_strings)} chuỗi và {len(behavior_report.get('events', []))} behavior events đã được lưu tại: {args.output}")
         else:
-            logger.warning("[-] Không tìm thấy chuỗi giải mã hợp lệ nào.")
+            logger.warning("[-] Không tìm thấy chuỗi hoặc behavior event hợp lệ nào.")
 
     except Exception as e:
         logger.critical(f"[!] Lỗi nghiêm trọng: {str(e)}")

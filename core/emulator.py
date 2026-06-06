@@ -2,13 +2,13 @@
 # pyright: reportMissingImports=false
 import logging
 import json
-import os
 import speakeasy
 from speakeasy.errors import SpeakeasyError, NotSupportedError
 from hooks.mem_hooks import WriteTracker, setup_memory_hooks
 from hooks.api_hooks import setup_api_hooks
 from hooks.register_hooks import scan_register_candidates, setup_register_hooks
 from core.extractor import StringExtractor
+from core.behavior import BehaviorTracer
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class MalwareEmulator:
         self.module = None
         self.extractor = StringExtractor(max_results=max_results)
         self.execution_status = None
+        self.behavior_tracer = BehaviorTracer()
         
         # Thêm tracker để ghi log địa chỉ được ghi (nhỏ gọn, không tốn performance)
         self.tracker = WriteTracker()
@@ -54,9 +55,6 @@ class MalwareEmulator:
         config_dict['max_instructions'] = self.max_instructions
 
         config_dict.setdefault('env', {})
-        _lab_val = os.environ.get('LAB_MALWARE_ALLOWED')
-        if _lab_val is not None:
-            config_dict['env']['LAB_MALWARE_ALLOWED'] = _lab_val
 
         try:
             self.se = speakeasy.Speakeasy(config=config_dict)
@@ -131,7 +129,7 @@ class MalwareEmulator:
         """
         logger.info("[Emulator] Đang cắm các cảm biến Hooks (Mem, API & Register)...")
         setup_memory_hooks(self.se, self.extractor, tracker=self.tracker)
-        setup_api_hooks(self.se, self.extractor)
+        setup_api_hooks(self.se, self.extractor, behavior_tracer=self.behavior_tracer)
         setup_register_hooks(
             self.se,
             self.extractor,
@@ -348,6 +346,7 @@ class MalwareEmulator:
         """
         try:
             report_json = json.loads(self.se.get_json_report())
+            self.behavior_tracer.ingest_speakeasy_report(report_json)
 
             # ── API call arguments (flat list, older Speakeasy format) ──
             for entry in report_json.get('entry_points', []):
@@ -381,4 +380,13 @@ class MalwareEmulator:
         return self.extractor.get_results(
             clean=clean,
             min_confidence=min_confidence,
+        )
+
+    def get_behavior_report(self, strings=None):
+        """Return best-effort behavior summary for the observed emulation path."""
+        if strings is None:
+            strings = self.get_extracted_strings()
+        return self.behavior_tracer.build_report(
+            strings=strings,
+            stop_reason=self.execution_status,
         )

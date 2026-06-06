@@ -3,7 +3,7 @@ import logging
 import speakeasy.windows.common as sc_common
 
 from collections.abc import Callable, Sequence
-from typing import Protocol, TypeAlias, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,17 @@ class _StringExtractorLike(Protocol):
         api_name: str,
         str_val: str,
         source_detail: str | None = None,
+    ) -> None: ...
+
+
+class _BehaviorTracerLike(Protocol):
+    def record_api_call(
+        self,
+        api_name: str,
+        args: Sequence[Any] | None = None,
+        *,
+        source: str = "api_hook",
+        time: float | None = None,
     ) -> None: ...
 
 
@@ -124,13 +135,21 @@ _STRING_API_HOOKS: list[ApiHookSpec] = [
     # advapi32 — registry access
     ("advapi32", "RegOpenKeyExA",    [(1, 1)]),           # lpSubKey
     ("advapi32", "RegOpenKeyExW",    [(1, 2)]),
+    ("advapi32", "RegCreateKeyExA",  [(1, 1)]),
+    ("advapi32", "RegCreateKeyExW",  [(1, 2)]),
+    ("advapi32", "RegSetValueExA",   [(1, 1), (4, 1)]),   # value name, data best-effort
+    ("advapi32", "RegSetValueExW",   [(1, 2), (4, 2)]),
     # kernel32 — filesystem access
     ("kernel32", "CreateFileA",      [(0, 1)]),           # lpFileName
     ("kernel32", "CreateFileW",      [(0, 2)]),
+    ("kernel32", "DeleteFileA",      [(0, 1)]),
+    ("kernel32", "DeleteFileW",      [(0, 2)]),
+    ("kernel32", "MoveFileA",        [(0, 1), (1, 1)]),
+    ("kernel32", "MoveFileW",        [(0, 2), (1, 2)]),
+    ("kernel32", "CopyFileA",        [(0, 1), (1, 1)]),
+    ("kernel32", "CopyFileW",        [(0, 2), (1, 2)]),
 ]
 
-
-import os
 
 def _get_or_create_iob_table(emu) -> int:
     """
@@ -166,7 +185,11 @@ def _get_or_create_iob_table(emu) -> int:
     emu._iob_table_addr = addr
     return addr
 
-def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None:
+def setup_api_hooks(
+    se: _HookRegistrar,
+    extractor: _StringExtractorLike,
+    behavior_tracer: _BehaviorTracerLike | None = None,
+) -> None:
     """
     Purpose:
     Install API hooks that capture string arguments passed to common
@@ -190,6 +213,17 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
     None.
     """
 
+    def _record_behavior(api_name: str, argv: Sequence[object], extra_args: Sequence[object] | None = None) -> None:
+        if behavior_tracer is None:
+            return
+        args = list(argv)
+        if extra_args:
+            args.extend(extra_args)
+        try:
+            behavior_tracer.record_api_call(api_name, args, source="api_hook")
+        except Exception:
+            logger.debug(f"[Hook] Behavior trace skipped for {api_name}")
+
     # ------------------------------------------------------------------
     # Original hooks (kernel32 string-copy / alloc)
     # ------------------------------------------------------------------
@@ -209,6 +243,7 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
                                              source_detail='lstrcpyW')
 
     def my_VirtualAlloc(_emu: _StringReader, _api_name: str, _func: object, argv: Sequence[object]) -> None:
+        _record_behavior('VirtualAlloc', argv)
         if len(argv) >= 4:
             dwSize = cast(int, argv[1])
             flProtect = cast(int, argv[3])
@@ -222,8 +257,10 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
     def my_getenv(emu, api_name, func, argv):
         if len(argv) >= 1:
             val = _safe_read_ansi(emu, argv[0])
-            # Handle the brokenly-decrypted LAB_MALWARE_ALLOWED string that malware3.exe actually checks
-            if val in ('LAB_MALWARE_ALLOWED', 'LAB/MALWIRE/ALLOwED') and os.environ.get('LAB_MALWARE_ALLOWED') == '1':
+            # Always satisfy the sample's lab-safety getenv gate inside the
+            # emulator. This removes the need for a host LAB_MALWARE_ALLOWED
+            # argument/environment variable while keeping execution sandboxed.
+            if val in ('LAB_MALWARE_ALLOWED', 'LAB/MALWIRE/ALLOwED'):
                 addr = emu.mem_alloc(2, base=None) if hasattr(emu, 'mem_alloc') else 0x69000100
                 if hasattr(emu, 'mem_write'):
                     emu.mem_write(addr, b'1\x00')
@@ -238,8 +275,10 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
             is_wide = api_name.endswith('W') or api_name == 'WinHttpSendRequest'
             reader = _safe_read_wide if is_wide else _safe_read_ansi
             headers = reader(emu, argv[1])
+            behavior_args = []
             if headers is not None:
                 extractor.process_api_string(api_name, headers, source_detail=api_name)
+                behavior_args.append(headers)
             
             # Capture optional body
             body_ptr = argv[3]
@@ -251,8 +290,10 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
                         # limit to specified length
                         body_val = raw_body[:body_len] if len(raw_body) > body_len else raw_body
                         extractor.process_api_string(api_name, body_val, source_detail=f"{api_name}_body")
+                        behavior_args.append(body_val)
                 except Exception:
                     pass
+        _record_behavior(api_name, argv, behavior_args if 'behavior_args' in locals() else None)
         return func(argv) if callable(func) else 1
 
     # ------------------------------------------------------------------
@@ -324,10 +365,12 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
 
 
     def my_IsDebuggerPresent(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
         return 0
 
 
     def my_CheckRemoteDebuggerPresent(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
         if len(argv) >= 2:
             out_ptr = argv[1]
             if isinstance(out_ptr, int) and out_ptr > 0:
@@ -341,6 +384,7 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
 
 
     def my_Sleep(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
         return None
 
     def my_OutputDebugStringA(emu, api_name, func, argv):
@@ -384,6 +428,7 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
         (emu, api_name, func, argv).
         """
         def _hook(emu: _StringReader, _api_name: str, func: object, argv: Sequence[object]) -> object:
+            behavior_args = []
             for arg_idx, width in arg_specs:
                 if arg_idx >= len(argv):
                     continue
@@ -392,6 +437,8 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
                 if val is not None:
                     extractor.process_api_string(hook_api_name, val,
                                                  source_detail=hook_api_name)
+                    behavior_args.append(val)
+            _record_behavior(hook_api_name, argv, behavior_args)
             return func(argv) if callable(func) else None
         return _hook
 
@@ -429,6 +476,34 @@ def setup_api_hooks(se: _HookRegistrar, extractor: _StringExtractorLike) -> None
         (my_WinHttpSendRequest, 'winhttp', 'WinHttpSendRequestA', {}),
         (my_WinHttpSendRequest, 'winhttp', 'WinHttpSendRequestW', {}),
     ]
+
+    def _simple_behavior_hook(api_name_for_trace: str):
+        def _hook(_emu, api_name, func, argv):
+            _record_behavior(api_name_for_trace or api_name, argv)
+            return func(argv) if callable(func) else None
+        return _hook
+
+    behavior_only_hooks = [
+        ('kernel32', 'WriteFile'),
+        ('kernel32', 'OpenProcess'),
+        ('kernel32', 'TerminateProcess'),
+        ('kernel32', 'VirtualAllocEx'),
+        ('kernel32', 'WriteProcessMemory'),
+        ('kernel32', 'CreateRemoteThread'),
+        ('kernel32', 'QueueUserAPC'),
+        ('kernel32', 'SetThreadContext'),
+        ('kernel32', 'ResumeThread'),
+        ('kernel32', 'CreateToolhelp32Snapshot'),
+        ('kernel32', 'Process32First'),
+        ('kernel32', 'Process32Next'),
+        ('ntdll', 'NtCreateThreadEx'),
+        ('ntdll', 'NtQueryInformationProcess'),
+        ('kernel32', 'GetTickCount'),
+        ('kernel32', 'QueryPerformanceCounter'),
+    ]
+    if behavior_tracer is not None:
+        for mod, name in behavior_only_hooks:
+            legacy_hooks.append((_simple_behavior_hook(name), mod, name, {}))
     for cb, mod, name, kwargs in legacy_hooks:
         try:
             _ = se.add_api_hook(cb, mod, name, **kwargs)

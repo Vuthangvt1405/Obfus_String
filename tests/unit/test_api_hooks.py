@@ -669,9 +669,8 @@ class TestGetEnvHook:
                 return cb(emu, "getenv", lambda args: 42, argv), ext
         return None, ext
 
-    def test_returns_lab_malware_pointer(self, monkeypatch):
-        import os
-        monkeypatch.setenv('LAB_MALWARE_ALLOWED', '1')
+    def test_returns_lab_malware_pointer_without_host_env(self, monkeypatch):
+        monkeypatch.delenv('LAB_MALWARE_ALLOWED', raising=False)
         emu = FakeEmu({(0x8000, 1): "LAB_MALWARE_ALLOWED"})
         ptr, ext = self._install_and_fire([0x8000], emu)
         assert ptr != 0 and ptr != 42

@@ -12,7 +12,8 @@ Công cụ này không cố khôi phục thuật toán decode. Kết quả phụ
 - **Tight-loop Safe-Stop**: `timeout` và `--max-instructions` dừng giả lập an toàn khi mẫu chạy vòng lặp dài. Sau khi dừng, công cụ vẫn drain Speakeasy report, register scan và dirty-region scan.
 - **Function-decoded output capture**: nếu function thật sự chạy và plaintext xuất hiện trong memory, API argument, Speakeasy report hoặc register pointer candidate, công cụ có thể bắt qua các output path đó. `hooks/register_hooks.py` cung cấp `register_scan` bounded để dereference register-held pointers.
 - **API argument hooks**: `hooks/api_hooks.py` bắt chuỗi ANSI/Wide từ một số Windows API như `lstrcpyA/W`, WinINet, WinHTTP, `CreateProcessA/W`, `CreateFileA/W`, `RegOpenKeyExA/W`.
-- **JSON output tương thích ngược**: report vẫn giữ `timestamp`, `total_strings`, `strings`; các field provenance như `source`, `source_detail`, `execution_constraints` là optional.
+- **Behavior tracing best-effort**: gom API call quan sát được và chuỗi/IOC runtime để suy luận hành vi như network, file, registry persistence, process execution, possible injection và anti-analysis. Đây là tóm tắt theo path đã emulation, không phải kết luận tuyệt đối.
+- **JSON output tương thích ngược**: report vẫn giữ `timestamp`, `total_strings`, `strings`; các field provenance như `source`, `source_detail`, `execution_constraints`, `behavior` là optional.
 
 ## Cài đặt
 
@@ -76,6 +77,7 @@ CLI flags chính:
 | `main.py` | CLI entrypoint: parse args, tạo `MalwareEmulator`, chạy phân tích và ghi report. |
 | `core/emulator.py` | Orchestrator của Speakeasy: load sample vào emulator, register hooks, run, safe-stop, gom kết quả. |
 | `core/extractor.py` | Bộ lọc và dedupe chuỗi: ASCII, UTF-16LE, tag URL/IP/domain/registry, source priority. |
+| `core/behavior.py` | Behavior tracer/classifier: network, file, registry, process, injection, evasion, IOC buckets và risk summary. |
 | `hooks/mem_hooks.py` | Memory-write tracking, hot-region snapshot, bounded `overwrite_history`, dirty regions. |
 | `hooks/register_hooks.py` | Bounded register pointer scan và optional code hook registration. |
 | `hooks/api_hooks.py` | Windows API string argument capture cho ANSI/Wide arguments. |
@@ -91,7 +93,8 @@ CLI flags chính:
 4. `run()` gọi `se.run_module()` và phân loại trạng thái kết thúc: `completed`, `timeout`, `max_instructions`, `unsupported_api`, hoặc `error`.
 5. Dù run bị safe-stop, `finally` vẫn chạy final `register_scan`, drain Speakeasy JSON report, drain `execute_after_write`/`overwrite_history`, rồi đọc lại dirty regions.
 6. `StringExtractor` lọc nhiễu, dedupe theo `content`, gắn source/provenance và tag regex.
-7. `ReportGenerator` ghi JSON output.
+7. `BehaviorTracer` phân loại API/string đã quan sát thành behavior events, IOC buckets, risk score và analyst summary theo hướng best-effort.
+8. `ReportGenerator` ghi JSON output.
 
 ## Phạm vi bắt chuỗi hiện tại
 
@@ -136,6 +139,32 @@ Report mặc định có dạng:
   ],
   "execution_constraints": {
     "stop_reason": "max_instructions"
+  },
+  "behavior": {
+    "verdict": "medium",
+    "risk_score": 43,
+    "summary": ["Observed behavior indicates possible network communication or payload download"],
+    "tactics": ["Command and Control"],
+    "iocs": {
+      "urls": ["http://example.com/payload"],
+      "domains": ["example.com"],
+      "ips": [],
+      "files": [],
+      "registry_keys": [],
+      "processes": []
+    },
+    "events": [
+      {
+        "api": "InternetOpenUrlA",
+        "category": "network.download",
+        "description": "Opens or downloads from a remote URL",
+        "indicators": ["http://example.com/payload"],
+        "confidence": 90,
+        "source": "api_hook",
+        "time": null
+      }
+    ],
+    "execution_note": "Behavior is path-limited; emulation stopped due to max_instructions."
   }
 }
 ```
