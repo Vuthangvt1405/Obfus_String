@@ -34,7 +34,51 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` cài Speakeasy từ GitHub của Mandiant, cùng `pefile`, `capstone` và `pytest`.
+`requirements.txt` cài Speakeasy từ GitHub của Mandiant, cùng `pefile`, `capstone`, `unicorn` và `pytest`.
+
+## Speakeasy engine / Unicorn
+
+Project dùng Speakeasy với engine mặc định từ `speakeasy.config.get_default_config_dict()`. Với version trong `requirements.txt`, engine mặc định là **Unicorn**.
+
+Kiểm tra nhanh Speakeasy default config:
+
+```bash
+python - <<'PY'
+import speakeasy
+cfg = speakeasy.config.get_default_config_dict()
+print(cfg.get("emu_engine"))
+PY
+```
+
+Kết quả mong đợi:
+
+```text
+unicorn
+```
+
+Kiểm tra trực tiếp qua `MalwareEmulator` của project:
+
+```bash
+python - <<'PY'
+from core.emulator import MalwareEmulator
+emu = MalwareEmulator(timeout=1, max_instructions=1000)
+print(emu.se.config.emu_engine)
+PY
+```
+
+Kết quả mong đợi:
+
+```text
+unicorn
+```
+
+Khi chạy phân tích, log Speakeasy cũng in cấu hình active, ví dụ:
+
+```text
+emu_engine = unicorn
+```
+
+Hiện tại `core/emulator.py` không cần hard-code `emu_engine` vì Speakeasy default config đã đặt là `unicorn`. Nếu muốn pin rõ ràng trong code, có thể thêm `config_dict["emu_engine"] = "unicorn"` trong `MalwareEmulator.__init__()`.
 
 ## Cách sử dụng
 
