@@ -107,9 +107,27 @@ python main.py -f payload.dll -a x64 -o payload_strings.json
 
 # Lọc noise và chỉ xuất kết quả confidence cao
 python main.py -f sample.exe --clean-output --min-confidence 70 -o report.json
+
+# Enrich report bằng VirusTotal theo SHA256 mẫu, cần VIRUSTOTAL_API_KEY trong .env
+python main.py -f sample.exe --vt-lookup -o report.json
+
+# Nếu hash chưa có trên VT và lab policy cho phép, upload mẫu lên VirusTotal
+python main.py -f sample.exe --vt-lookup --vt-upload -o report.json
 ```
 
 Một số lab sample có thể kiểm tra biến môi trường safety gate. Tool xử lý gate này bên trong emulator hook khi thấy `getenv("LAB_MALWARE_ALLOWED")`, nên không cần truyền host env var để chạy sample test.
+
+### Cấu hình `.env` cho VirusTotal
+
+VirusTotal enrichment là tùy chọn và chỉ chạy khi thêm flag `--vt-lookup`. API key không được hard-code trong source; đặt trong file `.env` ở project root:
+
+```bash
+VIRUSTOTAL_API_KEY=your_key_here
+```
+
+`.env` đã nằm trong `.gitignore`, không commit file này. Khi bật `--vt-lookup`, report sẽ thêm `sample.virustotal` gồm VT link, reputation, analysis stats và top detections. Nếu không có key, report ghi `status: missing_api_key` và workflow vẫn chạy bình thường.
+
+Nếu VT trả `not_found`, nghĩa là VT chưa có record cho hash này; đây **không đồng nghĩa sample sạch**. Nếu lab policy cho phép chia sẻ mẫu lên VirusTotal, thêm `--vt-upload`. Upload là hành động opt-in vì nó gửi bytes mẫu lên remote service. Sau upload, report thêm `sample.virustotal.upload` với analysis id/link; analyst có thể rerun `--vt-lookup` sau khi VT xử lý xong.
 
 CLI flags chính:
 
@@ -122,6 +140,8 @@ CLI flags chính:
 | `-o`, `--output` | File JSON output; mặc định `report.json`. |
 | `--clean-output` | Ẩn một số chuỗi `deferred_scan` nhiễu khi đã có evidence tự tin hơn. |
 | `--min-confidence` | Chỉ xuất chuỗi có confidence lớn hơn hoặc bằng ngưỡng này. |
+| `--vt-lookup` | Truy vấn VirusTotal bằng SHA256 mẫu và thêm kết quả vào `sample.virustotal`; cần `VIRUSTOTAL_API_KEY` trong `.env` hoặc host env. |
+| `--vt-upload` | Khi dùng cùng `--vt-lookup`, upload mẫu lên VirusTotal nếu hash trả `not_found`. Chỉ bật khi analyst/lab policy cho phép chia sẻ mẫu. |
 | `-d`, `--debug` | Bật log debug. |
 
 ### GUI local web
@@ -150,7 +170,7 @@ python gui.py --port 9000
 
 GUI hỗ trợ:
 
-- Form cấu hình sample, output, arch, timeout, max instructions, clean output, min confidence.
+- Form cấu hình sample, output, arch, timeout, max instructions, clean output, min confidence và tùy chọn VirusTotal hash lookup.
 - Live logs từ subprocess `main.py`.
 - Bảng strings có search, source filter và export CSV.
 - Behavior tab gồm verdict, risk score, summary, IOC buckets và event timeline.
@@ -164,6 +184,8 @@ GUI hỗ trợ:
 | `core/emulator.py` | Orchestrator của Speakeasy: load sample vào emulator, register hooks, run, safe-stop, gom kết quả. |
 | `core/extractor.py` | Bộ lọc và dedupe chuỗi: ASCII, UTF-16LE, tag URL/IP/domain/registry, source priority. |
 | `core/behavior.py` | Behavior tracer/classifier: network, file, registry, process, injection, evasion, IOC buckets và risk summary. |
+| `core/hash_layer.py` | Tính MD5/SHA1/SHA256, imphash và PE identity metadata cho analyst. |
+| `core/vt_layer.py` | Optional VirusTotal enrichment qua SHA256, đọc key từ `.env` hoặc environment. |
 | `hooks/mem_hooks.py` | Memory-write tracking, hot-region snapshot, bounded `overwrite_history`, dirty regions. |
 | `hooks/register_hooks.py` | Bounded register pointer scan và optional code hook registration. |
 | `hooks/api_hooks.py` | Windows API string argument capture cho ANSI/Wide arguments. |
