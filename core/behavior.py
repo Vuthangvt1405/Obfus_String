@@ -102,7 +102,12 @@ class BehaviorTracer:
         report_events.extend(_indicator_events(iocs))
         summary = _summarize(report_events, iocs)
         risk_score = _risk_score(report_events, iocs)
-        verdict = "high" if risk_score >= 70 else "medium" if risk_score >= 35 else "low"
+        if risk_score >= 70:
+            verdict = "high"
+        elif risk_score >= 35:
+            verdict = "medium"
+        else:
+            verdict = "low"
         tactics = _tactics(report_events)
         return {
             "verdict": verdict,
@@ -133,8 +138,7 @@ def _extract_indicators(values: Sequence[Any]) -> list[str]:
 
 
 def _classify_api(api_name: str, indicators: list[str], args: Sequence[Any]) -> tuple[str, str, int] | None:
-    api_full = api_name.lower()
-    api = api_full.rsplit('.', 1)[-1]
+    api = api_name.lower().rsplit('.', 1)[-1]
     joined = " ".join(str(a) for a in args if a is not None).lower()
 
     if api in {"internetopenurla", "internetopenurlw", "urldownloadtofilea", "urldownloadtofilew"}:
@@ -170,7 +174,13 @@ def _classify_api(api_name: str, indicators: list[str], args: Sequence[Any]) -> 
             return "injection.possible", "Uses APIs commonly seen in process injection", 85
         return "memory.allocate_or_thread", "Allocates memory or manipulates thread execution", 65
 
-    if api in {"isdebuggerpresent", "checkremotedebuggerpresent", "ntqueryinformationprocess", "outputdebugstringa", "outputdebugstringw"}:
+    if api in {
+        "isdebuggerpresent",
+        "checkremotedebuggerpresent",
+        "ntqueryinformationprocess",
+        "outputdebugstringa",
+        "outputdebugstringw",
+    }:
         return "evasion.debugger_check", "Checks for debugger or emits debug-probing output", 80
     if api in {"sleep", "getticks", "gettickcount", "queryperformancecounter"}:
         return "evasion.timing", "Uses timing or delay APIs", 55

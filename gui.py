@@ -45,14 +45,15 @@ class AnalysisJob:
             sample = str(payload.get("file") or "").strip()
             if not sample:
                 raise ValueError("Missing sample file")
-            if not Path(sample).exists():
+            sample_path = Path(sample)
+            if not sample_path.exists():
                 raise ValueError("Sample file does not exist")
 
             self.output = str(payload.get("output") or DEFAULT_OUTPUT).strip() or DEFAULT_OUTPUT
             cmd = [
                 sys.executable,
                 str(ROOT / "main.py"),
-                "-f", sample,
+                "-f", str(sample_path),
                 "-a", str(payload.get("arch") or "x86"),
                 "-t", str(payload.get("timeout") or "60"),
                 "--max-instructions", str(payload.get("max_instructions") or "5000000"),
@@ -305,14 +306,18 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
-    def do_POST(self) -> None:
-        path = urlparse(self.path).path
+    def _read_json_payload(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8") or "{}")
         except Exception:
-            payload = {}
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        payload = self._read_json_payload()
         if path == "/api/start":
             try:
                 ok = JOB.start(payload)

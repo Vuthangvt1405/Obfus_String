@@ -32,19 +32,30 @@ share/python-wheels/
 
 # Reports / Outputs
 report.json
+report_*.json
+*_report.json
+*_retest_report.json
+report_vt_upload.json
 change-report.md
 assert_t12.py
 *.json
 *.log
 output/
 reports/
+.rpiv/artifacts/
 
 # Malware Samples (IMPORTANT: Never commit real malware)
 *.exe
+*.exe.zip
 *.dll
 *.bin
 *.elf
 *.sys
+sample/**/malware*.exe
+sample/**/malware*.exe.zip
+sample/**/report*.json
+sample/**/malware*_report.json
+sample/**/malware*_retest_report.json
 samples/
 malware/
 test.exe

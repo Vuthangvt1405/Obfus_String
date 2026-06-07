@@ -243,7 +243,6 @@ class MalwareEmulator:
         finally:
             self._scan_registers()
             self._extract_from_report()
-            # Xử lý các vùng nhớ đã tracker sau khi giả lập kết thúc
             self._extract_tracked_memory()
 
         if self.execution_status and self.execution_status != "completed":
@@ -266,7 +265,7 @@ class MalwareEmulator:
         None.
         """
         try:
-            _ = scan_register_candidates(self.se, self.extractor)
+            scan_register_candidates(self.se, self.extractor)
         except Exception as e:
             logger.debug(f"[Emulator] Register scan skipped after error: {e}")
 
@@ -287,21 +286,14 @@ class MalwareEmulator:
         Returns:
         None.
         """
-        execute_after_write_candidates = self.tracker.get_execute_after_write_candidates()
-        for candidate_addr, candidate_data in execute_after_write_candidates:
-            before_count = len(self.extractor.get_results())
-            self.extractor.scan_buffer(candidate_addr, candidate_data)
-            for result in self.extractor.get_results()[before_count:]:
-                if result.get('source') == 'deferred_scan':
-                    result['source'] = 'execute_after_write'
-
-        tracker_candidates = self.tracker.get_candidates()
-        for candidate_addr, candidate_data in tracker_candidates:
-            before_count = len(self.extractor.get_results())
-            self.extractor.scan_buffer(candidate_addr, candidate_data)
-            for result in self.extractor.get_results()[before_count:]:
-                if result.get('source') == 'deferred_scan':
-                    result['source'] = 'overwrite_history'
+        self._scan_candidate_buffers(
+            self.tracker.get_execute_after_write_candidates(),
+            source_label='execute_after_write',
+        )
+        self._scan_candidate_buffers(
+            self.tracker.get_candidates(),
+            source_label='overwrite_history',
+        )
 
         tracker_regions = self.tracker.get_regions()
         if not tracker_regions:
@@ -334,6 +326,14 @@ class MalwareEmulator:
             if chunk_reads >= MAX_DEFERRED_CHUNK_READS:
                 logger.info("[Emulator] Deferred dirty-memory scan reached chunk-read cap.")
                 break
+
+    def _scan_candidate_buffers(self, candidates, source_label):
+        for candidate_addr, candidate_data in candidates:
+            before_count = len(self.extractor.get_results())
+            self.extractor.scan_buffer(candidate_addr, candidate_data)
+            for result in self.extractor.get_results()[before_count:]:
+                if result.get('source') == 'deferred_scan':
+                    result['source'] = source_label
 
     # Known scaffold/environment noise strings from Speakeasy's built-in
     # stub DLLs and emulator scaffolding that are never useful for malware
@@ -387,8 +387,6 @@ class MalwareEmulator:
     })
 
     def _is_scaffold_noise(self, s):
-        """Return True if *s* is an exact match against known Speakeasy
-        scaffold/environment noise strings (stub DLL names/paths)."""
         return s in self._SPEAKEASY_SCAFFOLD_NOISE
 
     def _extract_from_report(self):

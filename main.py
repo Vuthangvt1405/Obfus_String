@@ -68,13 +68,15 @@ def main():
     logger.info(f"[*] Bắt đầu phân tích mẫu: {args.file}")
 
     try:
+        max_instructions = args.max_instructions if args.max_instructions is not None else 5000000
+
         # 1. Khởi tạo Emulator
         emu = MalwareEmulator(
             arch=args.arch,
             timeout=args.timeout,
-            max_instructions=args.max_instructions if args.max_instructions is not None else 5000000,
+            max_instructions=max_instructions,
             debug=args.debug,
-            bypass_evasion=(not args.no_bypass_evasion)
+            bypass_evasion=not args.no_bypass_evasion,
         )
 
         # 2. Tải mẫu PE
@@ -123,7 +125,11 @@ def main():
                 sample=sample_identity,
                 allow_empty=has_behavior_events,
             )
-            logger.info(f"[+] Báo cáo {len(extracted_strings)} chuỗi và {len(behavior_report.get('events', []))} behavior events đã được lưu tại: {args.output}")
+            event_count = len(behavior_report.get('events', []))
+            logger.info(
+                f"[+] Báo cáo {len(extracted_strings)} chuỗi và {event_count} "
+                f"behavior events đã được lưu tại: {args.output}"
+            )
         else:
             logger.warning("[-] Không tìm thấy chuỗi hoặc behavior event hợp lệ nào.")
 

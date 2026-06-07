@@ -26,12 +26,10 @@ class ReportGenerator:
         Returns:
         None
         """
+        data_list = data_list or []
         if not data_list and not allow_empty:
             logger.warning("[Reporter] Không có dữ liệu để kết xuất.")
             return
-
-        if data_list is None:
-            data_list = []
 
         report = {
             "timestamp": datetime.now().isoformat(),
@@ -49,12 +47,11 @@ class ReportGenerator:
             report["sample"] = sample
 
         try:
-            # Đảm bảo thư mục đích tồn tại
             os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
-            
+
             with open(self.output_path, 'w', encoding='utf-8') as f:
                 json.dump(report, f, indent=4, ensure_ascii=False)
-                
+
             logger.info(f"[Reporter] Đã ghi thành công báo cáo JSON tại {self.output_path}")
         except Exception as e:
             logger.error(f"[Reporter] Lỗi khi ghi báo cáo: {e}")

@@ -69,14 +69,15 @@ def lookup_virustotal(sha256: str, *, timeout: int = 20) -> dict[str, Any]:
     stats = attrs.get("last_analysis_stats") or {}
     names = attrs.get("names") or []
     engines = attrs.get("last_analysis_results") or {}
-    detections = []
-    for engine, result in engines.items():
-        if result.get("category") in {"malicious", "suspicious"}:
-            detections.append({
-                "engine": engine,
-                "category": result.get("category"),
-                "result": result.get("result"),
-            })
+    detections = [
+        {
+            "engine": engine,
+            "category": result.get("category"),
+            "result": result.get("result"),
+        }
+        for engine, result in engines.items()
+        if result.get("category") in {"malicious", "suspicious"}
+    ]
 
     return {
         "enabled": True,
@@ -88,13 +89,13 @@ def lookup_virustotal(sha256: str, *, timeout: int = 20) -> dict[str, Any]:
         "popular_names": names[:8],
         "last_analysis_date": attrs.get("last_analysis_date"),
         "last_submission_date": attrs.get("last_submission_date"),
-        "stats": {
-            "malicious": int(stats.get("malicious") or 0),
-            "suspicious": int(stats.get("suspicious") or 0),
-            "undetected": int(stats.get("undetected") or 0),
-            "harmless": int(stats.get("harmless") or 0),
-            "timeout": int(stats.get("timeout") or 0),
-        },
+        "stats": {name: int(stats.get(name) or 0) for name in (
+            "malicious",
+            "suspicious",
+            "undetected",
+            "harmless",
+            "timeout",
+        )},
         "detections": detections[:20],
     }
 
@@ -127,12 +128,11 @@ def upload_file_to_virustotal(file_path: str, *, timeout: int = 60) -> dict[str,
         }
 
     boundary = "----malstringemu-vt-boundary"
-    file_bytes = path.read_bytes()
     body = b"".join([
         f"--{boundary}\r\n".encode(),
         f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'.encode(),
         b"Content-Type: application/octet-stream\r\n\r\n",
-        file_bytes,
+        path.read_bytes(),
         b"\r\n",
         f"--{boundary}--\r\n".encode(),
     ])

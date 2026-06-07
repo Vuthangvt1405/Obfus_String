@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import logging
-import speakeasy.windows.common as sc_common
 
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeAlias, cast
@@ -14,7 +13,7 @@ class _StringReader(Protocol):
 
 ArgSpec: TypeAlias = tuple[int, int]
 ApiHookSpec: TypeAlias = tuple[str, str, list[ArgSpec]]
-ApiCallback: TypeAlias = Callable[[_StringReader, str, object, Sequence[object]], None]
+ApiCallback: TypeAlias = Callable[[_StringReader, str, object, Sequence[object]], object]
 
 
 class _HookRegistrar(Protocol):
@@ -123,9 +122,7 @@ _STRING_API_HOOKS: list[ApiHookSpec] = [
     ("winhttp", "WinHttpGetProxyForUrl", [(1, 2)]),                 # URL
     ("winhttp", "WinHttpGetProxyForUrlA", [(1, 1)]),
     ("winhttp", "WinHttpGetProxyForUrlW", [(1, 2)]),
-    
-    
-    
+
     # kernel32 — process creation
     ("kernel32", "CreateProcessA",   [(0, 1), (1, 1)]),   # lpApplicationName, lpCommandLine
     ("kernel32", "CreateProcessW",   [(0, 2), (1, 2)]),
@@ -181,9 +178,10 @@ def _get_or_create_iob_table(emu) -> int:
         emu.mem_write(addr, b'\x00' * size)
     except Exception:
         pass
-        
+
     emu._iob_table_addr = addr
     return addr
+
 
 def setup_api_hooks(
     se: _HookRegistrar,
@@ -224,23 +222,27 @@ def setup_api_hooks(
         except Exception:
             logger.debug(f"[Hook] Behavior trace skipped for {api_name}")
 
-    # ------------------------------------------------------------------
-    # Original hooks (kernel32 string-copy / alloc)
-    # ------------------------------------------------------------------
+    def _capture_string_arg(
+        emu: _StringReader,
+        api_name: str,
+        argv: Sequence[object],
+        arg_index: int,
+        reader: Callable[[_StringReader, object], str | None],
+        *,
+        source_detail: str | None = None,
+    ) -> str | None:
+        if arg_index >= len(argv):
+            return None
+        val = reader(emu, argv[arg_index])
+        if val is not None:
+            extractor.process_api_string(api_name, val, source_detail=source_detail or api_name)
+        return val
 
     def my_lstrcpyA(emu: _StringReader, _api_name: str, _func: object, argv: Sequence[object]) -> None:
-        if len(argv) >= 2:
-            val = _safe_read_ansi(emu, argv[1])
-            if val is not None:
-                extractor.process_api_string('lstrcpyA', val,
-                                             source_detail='lstrcpyA')
+        _capture_string_arg(emu, 'lstrcpyA', argv, 1, _safe_read_ansi)
 
     def my_lstrcpyW(emu: _StringReader, _api_name: str, _func: object, argv: Sequence[object]) -> None:
-        if len(argv) >= 2:
-            val = _safe_read_wide(emu, argv[1])
-            if val is not None:
-                extractor.process_api_string('lstrcpyW', val,
-                                             source_detail='lstrcpyW')
+        _capture_string_arg(emu, 'lstrcpyW', argv, 1, _safe_read_wide)
 
     def my_VirtualAlloc(_emu: _StringReader, _api_name: str, _func: object, argv: Sequence[object]) -> None:
         _record_behavior('VirtualAlloc', argv)
@@ -277,18 +279,14 @@ def setup_api_hooks(
         return addr
 
     def my_WinHttpSendRequest(emu: _StringReader, api_name: str, func: object, argv: Sequence[object]) -> int:
-        # WinHttpSendRequest(hRequest, lpszHeaders, dwHeadersLength, lpOptional, dwOptionalLength, dwTotalLength, dwContext)
-        # Arg 1 is headers (wide/ansi based on API name). Arg 3 is body (always bytes/ansi). Arg 4 is length.
+        behavior_args = []
         if len(argv) >= 5:
-            # Capture headers
             is_wide = api_name.endswith('W') or api_name == 'WinHttpSendRequest'
             reader = _safe_read_wide if is_wide else _safe_read_ansi
-            headers = reader(emu, argv[1])
-            behavior_args = []
+            headers = _capture_string_arg(emu, api_name, argv, 1, reader)
             if headers is not None:
-                extractor.process_api_string(api_name, headers, source_detail=api_name)
                 behavior_args.append(headers)
-            
+
             # Capture optional body
             body_ptr = argv[3]
             body_len = argv[4]
@@ -302,16 +300,14 @@ def setup_api_hooks(
                         behavior_args.append(body_val)
                 except Exception:
                     pass
-        _record_behavior(api_name, argv, behavior_args if 'behavior_args' in locals() else None)
+        _record_behavior(api_name, argv, behavior_args)
         return func(argv) if callable(func) else 1
 
-    # ------------------------------------------------------------------
-    # Generic string-bearing API hook factory
-    # ------------------------------------------------------------------
-
-
     def my___acrt_iob_func(emu, api_name, func, argv):
-        return _get_or_create_iob_table(emu) + (int(argv[0]) * 0x100) if len(argv) >= 1 and isinstance(argv[0], int) and argv[0] in (0, 1, 2) else _get_or_create_iob_table(emu)
+        base = _get_or_create_iob_table(emu)
+        if len(argv) >= 1 and isinstance(argv[0], int) and argv[0] in (0, 1, 2):
+            return base + (argv[0] * 0x100)
+        return base
 
     def my_fflush(emu, api_name, func, argv):
         return 0
@@ -320,34 +316,23 @@ def setup_api_hooks(
         return 0
 
     def my_puts(emu, api_name, func, argv):
-        if len(argv) >= 1:
-            val = _safe_read_ansi(emu, argv[0])
-            if val is not None:
-                extractor.process_api_string(api_name, val, source_detail=api_name)
+        _capture_string_arg(emu, api_name, argv, 0, _safe_read_ansi)
         return 1
 
     def my_putchar(emu, api_name, func, argv):
         return int(argv[0]) & 0xFF if len(argv) >= 1 and isinstance(argv[0], int) else 0
 
     def my_printf(emu, api_name, func, argv):
-        if len(argv) >= 1:
-            val = _safe_read_ansi(emu, argv[0])
-            if val is not None:
-                extractor.process_api_string(api_name, val, source_detail=api_name)
+        _capture_string_arg(emu, api_name, argv, 0, _safe_read_ansi)
         return 1
 
     def my_fprintf(emu, api_name, func, argv):
-        if len(argv) >= 2:
-            val = _safe_read_ansi(emu, argv[1])
-            if val is not None:
-                extractor.process_api_string(api_name, val, source_detail=api_name)
+        _capture_string_arg(emu, api_name, argv, 1, _safe_read_ansi)
         return 1
 
     def my_fwrite(emu, api_name, func, argv):
         if len(argv) >= 4:
-            ptr = argv[0]
-            size = argv[1]
-            count = argv[2]
+            ptr, size, count = argv[:3]
             if isinstance(ptr, int) and ptr > 0 and isinstance(size, int) and size > 0 and isinstance(count, int) and count > 0:
                 read_len = min(size * count, 4096)
                 try:
@@ -427,17 +412,11 @@ def setup_api_hooks(
         return 0
 
     def my_OutputDebugStringA(emu, api_name, func, argv):
-        if len(argv) >= 1:
-            val = _safe_read_ansi(emu, argv[0])
-            if val is not None:
-                extractor.process_api_string(api_name, val, source_detail=api_name)
+        _capture_string_arg(emu, api_name, argv, 0, _safe_read_ansi)
         return None
 
     def my_OutputDebugStringW(emu, api_name, func, argv):
-        if len(argv) >= 1:
-            val = _safe_read_wide(emu, argv[0])
-            if val is not None:
-                extractor.process_api_string(api_name, val, source_detail=api_name)
+        _capture_string_arg(emu, api_name, argv, 0, _safe_read_wide)
         return None
 
     def my_ExitProcess(emu, api_name, func, argv):
@@ -520,6 +499,10 @@ def setup_api_hooks(
                     # ERROR_FILE_NOT_FOUND. Hide common VM artifacts so samples
                     # do not terminate before analyst-observable payload paths.
                     return 2
+                if "currentversion\\run" in joined:
+                    if len(argv) >= 5:
+                        _write_int(argv[4], 0x7000, size=8)
+                    return 0
             return func(argv) if callable(func) else None
         return _hook
 
