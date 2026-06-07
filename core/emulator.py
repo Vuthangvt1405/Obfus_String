@@ -18,7 +18,7 @@ MAX_DEFERRED_SCAN_PER_REGION = 8192
 MAX_DEFERRED_CHUNK_READS = 256
 
 class MalwareEmulator:
-    def __init__(self, arch="x86", timeout=60, max_instructions=5000000, debug=False, max_results=DEFAULT_MAX_RESULTS):
+    def __init__(self, arch="x86", timeout=60, max_instructions=5000000, debug=False, max_results=DEFAULT_MAX_RESULTS, bypass_evasion=True):
         """
         Purpose:
         Initialize the Speakeasy-backed malware emulation environment.
@@ -46,6 +46,7 @@ class MalwareEmulator:
         self.extractor = StringExtractor(max_results=max_results)
         self.execution_status = None
         self.behavior_tracer = BehaviorTracer()
+        self.bypass_evasion = bypass_evasion
         
         # Thêm tracker để ghi log địa chỉ được ghi (nhỏ gọn, không tốn performance)
         self.tracker = WriteTracker()
@@ -101,6 +102,9 @@ class MalwareEmulator:
                     vsize = getattr(sec, 'virtual_size', 0)
                     logger.debug(f"  + {name} | VAddr: {hex(vaddr)} | VSize: {hex(vsize)}")
 
+            if self.bypass_evasion:
+                self._apply_evasion_bypasses()
+
             return self.module
 
         except SpeakeasyError as e:
@@ -109,6 +113,59 @@ class MalwareEmulator:
         except Exception as e:
             logger.error(f"[Loader] Lỗi ngoại lệ khi nạp mẫu: {e}")
             return None
+
+    def _apply_evasion_bypasses(self):
+        """
+        Purpose:
+        Apply bounded, analysis-only patches that keep known anti-analysis gates
+        from terminating emulation before the payload path is reached.
+
+        How it works:
+        Currently patches the common MinGW x64 pattern used by malware4's
+        FullEvasionCheck(): ``test al, al; je clean_return; ... ExitProcess``.
+        Replacing the conditional jump with an unconditional jump skips only the
+        evasion-report/ExitProcess block, preserving the rest of main(). This is
+        applied in emulated memory, never to the host file on disk.
+        """
+        if not self.module:
+            return
+
+        patches = 0
+        for sec in getattr(self.module, 'sections', []) or []:
+            name = getattr(sec, 'name', '')
+            if name and '.text' not in str(name).lower():
+                continue
+            vaddr = getattr(sec, 'virtual_address', 0)
+            vsize = getattr(sec, 'virtual_size', 0)
+            if not vaddr or not vsize:
+                continue
+            start = self.module.base + vaddr
+            try:
+                data = self.se.mem_read(start, vsize)
+            except Exception as err:
+                logger.debug(f"[EvasionBypass] Cannot read code section {name}: {err}")
+                continue
+
+            # malware4 / MinGW x64 FullEvasionCheck:
+            #   84 c0                    test al, al
+            #   0f 84 b8 00 00 00        je  clean_return
+            #   48 8d 45 f7              lea rax, [rbp-9]   ; begin debug string path
+            pattern = b'\x84\xc0\x0f\x84\xb8\x00\x00\x00\x48\x8d\x45\xf7'
+            idx = data.find(pattern)
+            while idx != -1:
+                patch_addr = start + idx + 2
+                # jmp +0xb9; nop => target is the same clean-return epilogue as
+                # the original JE, but the jump is now unconditional.
+                try:
+                    self.se.mem_write(patch_addr, b'\xe9\xb9\x00\x00\x00\x90')
+                    patches += 1
+                    logger.info(f"[EvasionBypass] Patched anti-analysis exit branch at {hex(patch_addr)}")
+                except Exception as err:
+                    logger.warning(f"[EvasionBypass] Failed to patch {hex(patch_addr)}: {err}")
+                idx = data.find(pattern, idx + 1)
+
+        if patches == 0:
+            logger.info("[EvasionBypass] No known anti-analysis branch pattern matched.")
 
     def register_hooks(self):
         """
@@ -129,7 +186,7 @@ class MalwareEmulator:
         """
         logger.info("[Emulator] Đang cắm các cảm biến Hooks (Mem, API & Register)...")
         setup_memory_hooks(self.se, self.extractor, tracker=self.tracker)
-        setup_api_hooks(self.se, self.extractor, behavior_tracer=self.behavior_tracer)
+        setup_api_hooks(self.se, self.extractor, behavior_tracer=getattr(self, 'behavior_tracer', None))
         setup_register_hooks(
             self.se,
             self.extractor,
@@ -346,7 +403,9 @@ class MalwareEmulator:
         """
         try:
             report_json = json.loads(self.se.get_json_report())
-            self.behavior_tracer.ingest_speakeasy_report(report_json)
+            behavior_tracer = getattr(self, 'behavior_tracer', None)
+            if behavior_tracer is not None:
+                behavior_tracer.ingest_speakeasy_report(report_json)
 
             # ── API call arguments (flat list, older Speakeasy format) ──
             for entry in report_json.get('entry_points', []):
@@ -386,7 +445,10 @@ class MalwareEmulator:
         """Return best-effort behavior summary for the observed emulation path."""
         if strings is None:
             strings = self.get_extracted_strings()
-        return self.behavior_tracer.build_report(
+        behavior_tracer = getattr(self, 'behavior_tracer', None)
+        if behavior_tracer is None:
+            behavior_tracer = BehaviorTracer()
+        return behavior_tracer.build_report(
             strings=strings,
             stop_reason=self.execution_status,
         )

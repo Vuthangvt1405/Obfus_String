@@ -18,6 +18,7 @@ _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.IGNORECASE)
 _PATH_RE = re.compile(r"(?:[a-zA-Z]:\\[^\s\"'<>]+|%[A-Z_]+%\\[^\s\"'<>]+)")
 _REG_RE = re.compile(r"(?:HKCU|HKLM|HKEY_|Software\\|System\\|CurrentVersion\\Run)", re.IGNORECASE)
+_REG_PATH_START_RE = re.compile(r"(?:HKCU|HKLM|HKEY_[A-Z_]+|Software\\|System\\)[^\r\n]{0,220}", re.IGNORECASE)
 _EXE_RE = re.compile(r"\b[\w. -]+\.(?:exe|dll|bat|cmd|ps1|vbs|scr)\b", re.IGNORECASE)
 
 _PERSISTENCE_KEYS = (
@@ -124,15 +125,16 @@ def _extract_indicators(values: Sequence[Any]) -> list[str]:
         domain for domain in (m.group(0).strip(" ,;\x00") for m in _DOMAIN_RE.finditer(text))
         if _is_domain_ioc(domain)
     )
-    if _REG_RE.search(text):
-        found.append(text.strip()[:300])
+    for match in _REG_PATH_START_RE.finditer(text):
+        found.append(match.group(0).strip(" ,;\x00")[:300])
     lowered = text.lower()
     found.extend(tool for tool in _SUSPICIOUS_TOOLS if tool in lowered)
     return _dedupe(found)
 
 
 def _classify_api(api_name: str, indicators: list[str], args: Sequence[Any]) -> tuple[str, str, int] | None:
-    api = api_name.lower()
+    api_full = api_name.lower()
+    api = api_full.rsplit('.', 1)[-1]
     joined = " ".join(str(a) for a in args if a is not None).lower()
 
     if api in {"internetopenurla", "internetopenurlw", "urldownloadtofilea", "urldownloadtofilew"}:

@@ -5,6 +5,8 @@ import argparse
 import sys
 import logging
 from core.emulator import MalwareEmulator
+from core.hash_layer import calculate_sample_identity
+from core.vt_layer import lookup_virustotal, upload_file_to_virustotal
 from utils.reporter import ReportGenerator
 
 def parse_args(argv=None):
@@ -32,6 +34,10 @@ def parse_args(argv=None):
     parser.add_argument("--clean-output", action="store_true", help="Ẩn các chuỗi deferred_scan nhiễu khi đã có evidence tự tin hơn.")
     parser.add_argument("--min-confidence", type=int, help="Chỉ xuất chuỗi có confidence >= giá trị này.")
     parser.add_argument("-d", "--debug", action="store_true", help="Bật chế độ Debug để xem chi tiết PE load")
+    parser.add_argument("--vt-lookup", action="store_true", help="Enrich report with VirusTotal by SHA256. Requires VIRUSTOTAL_API_KEY env var or .env.")
+    parser.add_argument("--vt-upload", action="store_true", help="If VT hash lookup is not_found, upload the sample to VirusTotal for remote analysis. Analyst opt-in only.")
+    parser.add_argument("--bypass-evasion", action="store_true", help="Apply emulator-only anti-analysis bypasses to reach guarded payload paths. Enabled by default; kept for compatibility.")
+    parser.add_argument("--no-bypass-evasion", action="store_true", help="Disable emulator-only anti-analysis bypasses for baseline comparison.")
     return parser.parse_args(argv)
 
 def main():
@@ -67,7 +73,8 @@ def main():
             arch=args.arch,
             timeout=args.timeout,
             max_instructions=args.max_instructions if args.max_instructions is not None else 5000000,
-            debug=args.debug
+            debug=args.debug,
+            bypass_evasion=(not args.no_bypass_evasion)
         )
 
         # 2. Tải mẫu PE
@@ -84,6 +91,18 @@ def main():
         logger.info("[+] Giả lập hoàn tất hoặc đã đạt giới hạn an toàn.")
 
         # 5. Xuất báo cáo
+        sample_identity = calculate_sample_identity(args.file)
+        hashes = sample_identity.get("hashes", {})
+        logger.info(f"[*] Sample SHA256: {hashes.get('sha256', 'n/a')}")
+        if args.vt_lookup:
+            logger.info("[*] Querying VirusTotal by SHA256...")
+            sample_identity["virustotal"] = lookup_virustotal(hashes.get("sha256", ""))
+            vt_status = sample_identity["virustotal"].get("status")
+            logger.info(f"[*] VirusTotal status: {vt_status}")
+            if args.vt_upload and vt_status == "not_found":
+                logger.warning("[*] Uploading sample bytes to VirusTotal because --vt-upload was requested.")
+                sample_identity["virustotal"]["upload"] = upload_file_to_virustotal(args.file)
+                logger.info(f"[*] VirusTotal upload status: {sample_identity['virustotal']['upload'].get('status')}")
         extracted_strings = emu.get_extracted_strings(
             clean=args.clean_output,
             min_confidence=args.min_confidence,
@@ -101,6 +120,7 @@ def main():
                 extracted_strings,
                 metadata=metadata,
                 behavior=behavior_report,
+                sample=sample_identity,
                 allow_empty=has_behavior_events,
             )
             logger.info(f"[+] Báo cáo {len(extracted_strings)} chuỗi và {len(behavior_report.get('events', []))} behavior events đã được lưu tại: {args.output}")

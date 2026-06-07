@@ -252,20 +252,29 @@ def setup_api_hooks(
     def my___iob_func(emu: _StringReader, _api_name: str, _func: object, argv: Sequence[object]) -> int:
         return _get_or_create_iob_table(emu)
 
+    def _safe_mem_write(ptr: object, data: bytes) -> None:
+        if isinstance(ptr, int) and ptr > 0 and hasattr(se, 'mem_write'):
+            try:
+                se.mem_write(ptr, data)
+            except Exception:
+                pass
 
+    def _write_int(ptr: object, value: int, size: int = 4) -> None:
+        _safe_mem_write(ptr, int(value).to_bytes(size, 'little', signed=False))
 
     def my_getenv(emu, api_name, func, argv):
-        if len(argv) >= 1:
-            val = _safe_read_ansi(emu, argv[0])
-            # Always satisfy the sample's lab-safety getenv gate inside the
-            # emulator. This removes the need for a host LAB_MALWARE_ALLOWED
-            # argument/environment variable while keeping execution sandboxed.
-            if val in ('LAB_MALWARE_ALLOWED', 'LAB/MALWIRE/ALLOwED'):
-                addr = emu.mem_alloc(2, base=None) if hasattr(emu, 'mem_alloc') else 0x69000100
-                if hasattr(emu, 'mem_write'):
-                    emu.mem_write(addr, b'1\x00')
-                return addr
-        return func(argv) if callable(func) else 0
+        """Satisfy only the lab-gate environment variable; delegate others."""
+        val = _safe_read_ansi(emu, argv[0]) if len(argv) >= 1 else None
+        if val and val != 'LAB_MALWARE_ALLOWED':
+            extractor.process_api_string(api_name, val, source_detail=api_name)
+        if val is not None and val != 'LAB_MALWARE_ALLOWED':
+            return func(argv) if callable(func) else 0
+        # If Speakeasy cannot decode getenv's argument (common with some CRT
+        # thunks), prefer exploration and satisfy the gate.
+        addr = emu.mem_alloc(2, base=None) if hasattr(emu, 'mem_alloc') else 0x69000100
+        if hasattr(emu, 'mem_write'):
+            emu.mem_write(addr, b'1\x00')
+        return addr
 
     def my_WinHttpSendRequest(emu: _StringReader, api_name: str, func: object, argv: Sequence[object]) -> int:
         # WinHttpSendRequest(hRequest, lpszHeaders, dwHeadersLength, lpOptional, dwOptionalLength, dwTotalLength, dwContext)
@@ -372,20 +381,50 @@ def setup_api_hooks(
     def my_CheckRemoteDebuggerPresent(emu, api_name, func, argv):
         _record_behavior(api_name, argv)
         if len(argv) >= 2:
-            out_ptr = argv[1]
-            if isinstance(out_ptr, int) and out_ptr > 0:
-                try:
-                    emu.mem_write(out_ptr, b'\x00\x00\x00\x00')
-                except Exception:
-                    pass
+            _write_int(argv[1], 0)
         return 1
-
-
-
 
     def my_Sleep(emu, api_name, func, argv):
         _record_behavior(api_name, argv)
         return None
+
+    def my_GetTickCount(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
+        tick = getattr(emu, '_analysis_tick', 100000)
+        tick += 100
+        setattr(emu, '_analysis_tick', tick)
+        return tick & 0xffffffff
+
+    def my_QueryPerformanceCounter(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
+        counter = getattr(emu, '_analysis_qpc', 1000000)
+        counter += 1000
+        setattr(emu, '_analysis_qpc', counter)
+        if len(argv) >= 1:
+            _write_int(argv[0], counter, size=8)
+        return 1
+
+    def my_NtQueryInformationProcess(emu, api_name, func, argv):
+        # Common anti-debug classes:
+        #   7  ProcessDebugPort          -> 0 / no debug port
+        #   0x1e ProcessDebugObjectHandle -> 0 / no object
+        #   0x1f ProcessDebugFlags       -> 1 / not debugged
+        _record_behavior(api_name, argv)
+        if len(argv) >= 3:
+            info_class = argv[1]
+            out_ptr = argv[2]
+            if isinstance(info_class, int):
+                val = 1 if info_class == 0x1f else 0
+                size = 8 if info_class in (7, 0x1e) else 4
+                _write_int(out_ptr, val, size=size)
+        if len(argv) >= 5:
+            _write_int(argv[4], 0)
+        return 0
+
+    def my_FindWindow(emu, api_name, func, argv):
+        # Hide debugger/sandbox tool windows by returning NULL.
+        _record_behavior(api_name, argv)
+        return 0
 
     def my_OutputDebugStringA(emu, api_name, func, argv):
         if len(argv) >= 1:
@@ -402,11 +441,47 @@ def setup_api_hooks(
         return None
 
     def my_ExitProcess(emu, api_name, func, argv):
-        # We MUST bypass ExitProcess by manipulating the instruction pointer (RIP) 
-        # to effectively RETURN from FullEvasionCheck instead of halting.
-        # However, an easier way: just skip it! Wait, ExitProcess does not return. If we return, the program continues executing to the next instruction in ExitProcess which is likely INT3 or crash.
-        # Let's make it increment RIP to return from FullEvasionCheck. Actually, just returning `0` and ignoring the failure is best, because `FullEvasionCheck` has no code after `ExitProcess(0)`. The function epilogue for `FullEvasionCheck` will run and it will return normally to main!
+        # Non-fatal under emulation so final extractors can still drain state.
         return None
+
+    def my_FindNextFile(emu, api_name, func, argv):
+        # Speakeasy may model failed BOOL APIs as 0xffffffff for some paths,
+        # which can accidentally keep file-enumeration loops alive. Return the
+        # Win32 BOOL failure value (0) so ransomware directory walks terminate
+        # and later payload stages become observable.
+        _record_behavior(api_name, argv)
+        return 0
+
+    def my_strtol(emu, api_name, func, argv):
+        # msvcrt.strtol(nptr, endptr, base) is used by std::stoi in MinGW.
+        # Speakeasy may not implement it; a small hook lets execution continue
+        # into payload threads.
+        text = _safe_read_ansi(emu, argv[0]) if len(argv) >= 1 else None
+        if text:
+            extractor.process_api_string(api_name, text, source_detail=api_name)
+        base = argv[2] if len(argv) >= 3 and isinstance(argv[2], int) else 10
+        try:
+            value = int((text or "0").strip().split("\x00", 1)[0], base or 10)
+        except Exception:
+            value = 0
+        if len(argv) >= 2:
+            # Best-effort endptr = nptr + len(parsed text).
+            nptr = argv[0]
+            endptr = argv[1]
+            if isinstance(nptr, int) and isinstance(endptr, int) and endptr > 0:
+                _write_int(endptr, nptr + len(text or ""), size=8)
+        return value
+
+    def my_socket_behavior(emu, api_name, func, argv):
+        _record_behavior(api_name, argv)
+        return func(argv) if callable(func) else 1
+
+    def my_inet_pton(emu, api_name, func, argv):
+        ip = _safe_read_ansi(emu, argv[1]) if len(argv) >= 2 else None
+        if ip:
+            extractor.process_api_string(api_name, ip, source_detail=api_name)
+        _record_behavior(api_name, argv, [ip] if ip else None)
+        return func(argv) if callable(func) else 1
 
     def _make_hook(hook_api_name: str, arg_specs: Sequence[ArgSpec]) -> ApiCallback:
         """
@@ -439,6 +514,12 @@ def setup_api_hooks(
                                                  source_detail=hook_api_name)
                     behavior_args.append(val)
             _record_behavior(hook_api_name, argv, behavior_args)
+            if hook_api_name in ("RegOpenKeyExA", "RegOpenKeyExW"):
+                joined = " ".join(behavior_args).lower()
+                if "vmware" in joined or "virtualbox" in joined or "vbox" in joined:
+                    # ERROR_FILE_NOT_FOUND. Hide common VM artifacts so samples
+                    # do not terminate before analyst-observable payload paths.
+                    return 2
             return func(argv) if callable(func) else None
         return _hook
 
@@ -483,6 +564,26 @@ def setup_api_hooks(
             return func(argv) if callable(func) else None
         return _hook
 
+    if behavior_tracer is not None:
+        legacy_hooks.extend([
+            (my_GetTickCount, 'kernel32', 'GetTickCount', {}),
+            (my_QueryPerformanceCounter, 'kernel32', 'QueryPerformanceCounter', {}),
+            (my_NtQueryInformationProcess, 'ntdll', 'NtQueryInformationProcess', {}),
+            (my_FindWindow, 'user32', 'FindWindowA', {}),
+            (my_FindWindow, 'user32', 'FindWindowW', {}),
+            (my_FindWindow, 'user32', 'FindWindowExA', {}),
+            (my_FindWindow, 'user32', 'FindWindowExW', {}),
+            (my_FindNextFile, 'kernel32', 'FindNextFileA', {}),
+            (my_FindNextFile, 'kernel32', 'FindNextFileW', {}),
+            (my_strtol, 'msvcrt', 'strtol', {}),
+            (my_socket_behavior, 'ws2_32', 'WSAStartup', {}),
+            (my_socket_behavior, 'ws2_32', 'socket', {}),
+            (my_socket_behavior, 'ws2_32', 'connect', {}),
+            (my_socket_behavior, 'ws2_32', 'closesocket', {}),
+            (my_socket_behavior, 'ws2_32', 'WSACleanup', {}),
+            (my_inet_pton, 'ws2_32', 'inet_pton', {}),
+        ])
+
     behavior_only_hooks = [
         ('kernel32', 'WriteFile'),
         ('kernel32', 'OpenProcess'),
@@ -497,9 +598,6 @@ def setup_api_hooks(
         ('kernel32', 'Process32First'),
         ('kernel32', 'Process32Next'),
         ('ntdll', 'NtCreateThreadEx'),
-        ('ntdll', 'NtQueryInformationProcess'),
-        ('kernel32', 'GetTickCount'),
-        ('kernel32', 'QueryPerformanceCounter'),
     ]
     if behavior_tracer is not None:
         for mod, name in behavior_only_hooks:

@@ -10,7 +10,7 @@ class ReportGenerator:
     def __init__(self, output_path):
         self.output_path = output_path
 
-    def save(self, data_list, metadata=None, behavior=None, allow_empty=False):
+    def save(self, data_list, metadata=None, behavior=None, sample=None, allow_empty=False):
         """
         Lưu danh sách chuỗi trích xuất được ra file JSON.
 
@@ -19,6 +19,7 @@ class ReportGenerator:
         - metadata: optional dict injected under the "execution_constraints"
           key at the report root. Pass None (default) to omit the key.
         - behavior: optional behavior report injected under the "behavior" key.
+        - sample: optional sample identity/hash layer injected under "sample".
         - allow_empty: when True, write a report even if data_list is empty
           so behavior-only reports can be saved.
 
@@ -43,6 +44,9 @@ class ReportGenerator:
 
         if behavior is not None:
             report["behavior"] = behavior
+
+        if sample is not None:
+            report["sample"] = sample
 
         try:
             # Đảm bảo thư mục đích tồn tại
