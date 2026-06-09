@@ -2,6 +2,7 @@
 # pyright: reportMissingImports=false
 import logging
 import json
+import re
 import speakeasy
 from speakeasy.errors import SpeakeasyError, NotSupportedError
 from hooks.mem_hooks import WriteTracker, setup_memory_hooks
@@ -16,6 +17,7 @@ DEFAULT_MAX_RESULTS = 10000
 MAX_DEFERRED_CHUNK_SIZE = 4096
 MAX_DEFERRED_SCAN_PER_REGION = 8192
 MAX_DEFERRED_CHUNK_READS = 256
+STATIC_OBFUSCATED_MAX_RUN = 256
 
 class MalwareEmulator:
     def __init__(self, arch="x86", timeout=60, max_instructions=5000000, debug=False, max_results=DEFAULT_MAX_RESULTS, bypass_evasion=True):
@@ -43,6 +45,7 @@ class MalwareEmulator:
         self.max_instructions = max_instructions
         self.debug = debug
         self.module = None
+        self.sample_path = None
         self.extractor = StringExtractor(max_results=max_results)
         self.execution_status = None
         self.behavior_tracer = BehaviorTracer()
@@ -88,6 +91,7 @@ class MalwareEmulator:
         """
         try:
             logger.info(f"[Loader] Đang đọc file PE: {file_path}")
+            self.sample_path = file_path
             self.module = self.se.load_module(file_path)
 
             base_addr = self.module.base
@@ -104,6 +108,8 @@ class MalwareEmulator:
 
             if self.bypass_evasion:
                 self._apply_evasion_bypasses()
+
+            self._extract_static_obfuscated_strings(file_path)
 
             return self.module
 
@@ -166,6 +172,76 @@ class MalwareEmulator:
 
         if patches == 0:
             logger.info("[EvasionBypass] No known anti-analysis branch pattern matched.")
+
+    _STATIC_PRINTABLE_RE = re.compile(rb'[\x09\x0a\x0b\x0c\x0d\x20-\x7e]{4,256}')
+
+    @staticmethod
+    def _decode_reverse_shift(candidate: bytes) -> str | None:
+        """
+        Decode strings obfuscated as reverse(+1), where runtime decrypt does
+        char-1 for every byte and then reverses the buffer. This is intentionally
+        generic and bounded so samples that hide config in static C strings can
+        still be covered when emulation does not reach their payload path.
+        """
+        if not candidate:
+            return None
+        try:
+            decoded_bytes = bytes(((b - 1) & 0xff) for b in candidate)[::-1]
+            return decoded_bytes.decode('ascii', errors='ignore').strip('\x00')
+        except Exception:
+            return None
+
+    @staticmethod
+    def _looks_like_analyst_string(value: str) -> bool:
+        if not value or len(value) < 4:
+            return False
+        lowered = value.lower()
+        if re.search(r'(?:\d{1,3}\.){3}\d{1,3}', value):
+            return True
+        if re.fullmatch(r'\d{2,5}', value):
+            return True
+        indicators = (
+            '.dll', '.exe', 'software\\', 'currentversion\\run', 'hkey_',
+            'vmware', 'virtualbox', 'malware', 'mutex', 'keylog', 'clipboard', 'webcam',
+            'evasion', 'c2', 'cmd.', '\\run'
+        )
+        return any(item in lowered for item in indicators)
+
+    def _extract_static_obfuscated_strings(self, file_path):
+        """
+        Best-effort static fallback for simple runtime decryptors. It does not
+        replace emulation; it supplements it when a sample stores config strings
+        as printable reverse+shift blobs but Speakeasy stops before the decode
+        function reaches payload logic.
+        """
+        try:
+            data = open(file_path, 'rb').read()
+        except Exception as err:
+            logger.debug(f"[StaticObf] Cannot read sample bytes: {err}")
+            return
+
+        before = len(self.extractor.get_results())
+        seen: set[bytes] = set()
+        for match in self._STATIC_PRINTABLE_RE.finditer(data):
+            raw = match.group(0)[:STATIC_OBFUSCATED_MAX_RUN]
+            # C-string extraction regex can include leading control bytes used
+            # to encode a plaintext trailing newline. Try both full and stripped
+            # variants so '[...\\n' logs are still recovered without the newline.
+            for candidate in (raw, raw.strip(b'\x09\x0a\x0b\x0c\x0d')):
+                if len(candidate) < 4 or candidate in seen:
+                    continue
+                seen.add(candidate)
+                decoded = self._decode_reverse_shift(candidate)
+                if decoded and self._looks_like_analyst_string(decoded):
+                    self.extractor.ingest_candidate(
+                        decoded,
+                        source='static_obfuscated',
+                        location=f"file+0x{match.start():x}",
+                        source_detail='reverse_shift_minus1',
+                    )
+        added = len(self.extractor.get_results()) - before
+        if added:
+            logger.info(f"[StaticObf] Recovered {added} reverse+shift candidate strings from static bytes.")
 
     def register_hooks(self):
         """

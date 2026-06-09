@@ -231,6 +231,7 @@ class StringExtractor:
 
     _SOURCE_PRIORITY = {
         "deferred_scan": 20,
+        "static_obfuscated": 25,
         "overwrite_history": 30,
         "mem_write": 40,
         "execute_after_write": 45,
@@ -240,6 +241,7 @@ class StringExtractor:
 
     _SOURCE_CONFIDENCE = {
         "deferred_scan": 40,
+        "static_obfuscated": 55,
         "overwrite_history": 65,
         "mem_write": 60,
         "execute_after_write": 75,
@@ -270,7 +272,9 @@ class StringExtractor:
         True if the string should be discarded as noise, False otherwise.
         """
         if len(set(content)) == 1:
-            return True
+            # Repeated numeric strings can be meaningful short config values
+            # such as malware C2 ports (for example "4444").
+            return not content.isdigit()
         if content in self._NOISE_STRINGS:
             return True
         return False

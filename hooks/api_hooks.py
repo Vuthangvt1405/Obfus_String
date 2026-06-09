@@ -451,6 +451,23 @@ def setup_api_hooks(
                 _write_int(endptr, nptr + len(text or ""), size=8)
         return value
 
+    def my_memchr(emu, api_name, func, argv):
+        # MinGW/C++ runtime uses memchr while normalizing module paths before
+        # user payload code runs. Speakeasy may not implement it; emulate the
+        # small C-library behavior so analysis can continue past CRT startup.
+        if len(argv) < 3:
+            return 0
+        buf, ch, count = argv[:3]
+        if not (isinstance(buf, int) and buf > 0 and isinstance(ch, int) and isinstance(count, int) and count > 0):
+            return 0
+        try:
+            data = emu.mem_read(buf, min(count, 0x10000))
+        except Exception:
+            return 0
+        needle = ch & 0xFF
+        idx = data.find(bytes([needle]))
+        return buf + idx if idx >= 0 else 0
+
     def my_socket_behavior(emu, api_name, func, argv):
         _record_behavior(api_name, argv)
         return func(argv) if callable(func) else 1
@@ -559,6 +576,7 @@ def setup_api_hooks(
             (my_FindNextFile, 'kernel32', 'FindNextFileA', {}),
             (my_FindNextFile, 'kernel32', 'FindNextFileW', {}),
             (my_strtol, 'msvcrt', 'strtol', {}),
+            (my_memchr, 'msvcrt', 'memchr', {}),
             (my_socket_behavior, 'ws2_32', 'WSAStartup', {}),
             (my_socket_behavior, 'ws2_32', 'socket', {}),
             (my_socket_behavior, 'ws2_32', 'connect', {}),
