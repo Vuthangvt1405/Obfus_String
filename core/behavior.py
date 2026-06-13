@@ -219,6 +219,19 @@ def _collect_iocs(strings: Iterable[Mapping[str, Any]], events: Sequence[Behavio
             or "c2" in v.lower()
         )
     )
+    capability_markers = _dedupe(
+        v[:300] for v in vals
+        if any(
+            needle in v.lower()
+            for needle in (
+                "keylog", "clipboard", "credential", "login data", "password",
+                "screenshot", "screen", "webcam", "inject", "hollow",
+                "ransom", "encrypt", "evasion", "debugger", "vmware",
+                "virtualbox", "sandbox", "worm", "exploit", "trojan",
+                "persistence", "uninstall", "polymorph", "fileless",
+            )
+        )
+    )
     return {
         "urls": urls[:100],
         "domains": domains[:100],
@@ -227,6 +240,7 @@ def _collect_iocs(strings: Iterable[Mapping[str, Any]], events: Sequence[Behavio
         "registry_keys": registry_keys[:100],
         "processes": processes[:100],
         "network_artifacts": network_artifacts[:100],
+        "capability_markers": capability_markers[:100],
     }
 
 
@@ -243,8 +257,15 @@ def _is_domain_ioc(value: str) -> bool:
 
 
 def _indicator_events(iocs: Mapping[str, list[str]]) -> list[BehaviorEvent]:
-    """Create low/medium-confidence events from extracted string IOCs."""
+    """Create low/medium-confidence events from extracted string IOCs.
+
+    String-only reports are common when samples emit decoded lab markers via
+    OutputDebugStringA or when Speakeasy observes config but not the real API
+    path.  These events keep the analyst behavior summary useful without
+    overstating that the action executed.
+    """
     events: list[BehaviorEvent] = []
+    all_iocs = "\n".join(v for values in iocs.values() for v in values).lower()
     if iocs.get("urls"):
         events.append(BehaviorEvent(
             api="extracted_strings",
@@ -293,6 +314,24 @@ def _indicator_events(iocs: Mapping[str, list[str]]) -> list[BehaviorEvent]:
             confidence=35,
             source="string_ioc",
         ))
+    keyword_specs = [
+        (("keylog", "clipboard", "credential", "login data", "password"), "collection.input_or_credentials", "Extracted strings reference keylogging, clipboard, or credential collection", 45),
+        (("screenshot", "screen", "webcam"), "collection.screen_or_camera", "Extracted strings reference screen or webcam capture", 40),
+        (("inject", "hollow", "writeprocessmemory", "virtualallocex", "createremotethread"), "injection.possible", "Extracted strings reference process injection or hollowing", 55),
+        (("ransom", "encrypt", "encrypted"), "impact.ransomware_indicator", "Extracted strings reference ransomware or file encryption behavior", 45),
+        (("evasion", "debugger", "vmware", "virtualbox", "sandbox"), "evasion.indicator", "Extracted strings reference anti-analysis or VM checks", 45),
+    ]
+    for needles, category, description, confidence in keyword_specs:
+        if any(needle in all_iocs for needle in needles):
+            indicators = [v for values in iocs.values() for v in values if any(n in v.lower() for n in needles)][:8]
+            events.append(BehaviorEvent(
+                api="extracted_strings",
+                category=category,
+                description=description,
+                indicators=indicators,
+                confidence=confidence,
+                source="string_ioc",
+            ))
     return events
 
 
@@ -313,6 +352,10 @@ def _summarize(events: Sequence[BehaviorEvent], iocs: Mapping[str, list[str]]) -
         out.append("Observed behavior indicates registry access")
     if any(c.startswith("injection") for c in cats):
         out.append("Observed behavior indicates possible process injection")
+    if any(c.startswith("collection") for c in cats):
+        out.append("Observed strings indicate possible collection capability such as keylogging, clipboard, screenshot, webcam, or credential access")
+    if any(c.startswith("impact") for c in cats):
+        out.append("Observed strings indicate possible impact behavior such as ransomware or encryption")
     if any(c.startswith("evasion") for c in cats):
         out.append("Observed behavior indicates anti-analysis or timing checks")
     return out or ["No high-level behavior was confidently classified from the observed path"]
@@ -327,6 +370,10 @@ def _risk_score(events: Sequence[BehaviorEvent], iocs: Mapping[str, list[str]]) 
         "persistence.registry_run": 25,
         "injection.possible": 28,
         "evasion.debugger_check": 15,
+        "evasion.indicator": 8,
+        "collection.input_or_credentials": 12,
+        "collection.screen_or_camera": 8,
+        "impact.ransomware_indicator": 12,
         "file.write": 12,
         "file.open_or_create": 8,
         "registry.write": 12,
@@ -353,6 +400,10 @@ def _tactics(events: Sequence[BehaviorEvent]) -> list[str]:
         out.append("Persistence")
     if any(c.startswith("injection") for c in cats):
         out.append("Defense Evasion")
+    if any(c.startswith("collection") for c in cats):
+        out.append("Collection")
+    if any(c.startswith("impact") for c in cats):
+        out.append("Impact")
     if any(c.startswith("evasion") for c in cats):
         out.append("Discovery / Evasion")
     if any(c.startswith("file") or c.startswith("registry") for c in cats):
